@@ -1,0 +1,40 @@
+# --- secrets / local config ---
+.env
+.env.local
+*.env.local
+src/.dev.vars
+
+# --- runtime data (sqlite, browser cache, register outputs, backups) ---
+data/
+src/data/
+
+# --- editor ---
+.idea
+.vscode
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- node / web ---
+web/node_modules/
+web/dist/
+web/.vite/
+node_modules/
+*.log
+npm-debug.log*
+bun-debug.log*
+
+# --- frontend build artifacts (served by backend; rebuild with `bun run build`) ---
+src/static/admin/accounts.html
+src/static/admin/assets/
+
+# --- os ---
+.DS_Store
+Thumbs.db

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <script>
+    // Admin base path (replaced by the FastAPI backend at serve time).
+    // The backend string-replaces the next line with the configured base,
+    // so it MUST stay byte-for-byte identical to what _admin_page() expects.
+    window.__ADMIN_BASE__ = window.__ADMIN_BASE__ || "/admin";
+    window.__adminUrl = function () {
+      var base = String(window.__ADMIN_BASE__ || "/admin").replace(/\/+$/, "") || "/admin";
+      var parts = Array.prototype.slice.call(arguments).filter(function (p) {
+        return p !== undefined && p !== null && String(p).length;
+      }).map(function (p) { return String(p).replace(/^\/+|\/+$/g, ""); });
+      return parts.length ? (base + "/" + parts.join("/")) : base;
+    };
+  </script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grok注册机</title>
+  <script>
+    // Prevent theme FOUC: apply saved theme before first paint.
+    (function () {
+      try {
+        var key = "grok_register_theme";
+        var saved = localStorage.getItem(key);
+        var theme = (saved === "light" || saved === "dark") ? saved : "dark";
+        document.documentElement.setAttribute("data-theme", theme);
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    })();
+  </script>
+</head>
+<body class="auth-pending">
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>
