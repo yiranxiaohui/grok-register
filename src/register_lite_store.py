@@ -1473,6 +1473,8 @@ def _ensure_account_columns(conn: sqlite3.Connection) -> None:
         )
     if "cpa_auth_json" not in columns:
         conn.execute("ALTER TABLE accounts ADD COLUMN cpa_auth_json TEXT")
+    if "proxy_url" not in columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN proxy_url TEXT")
     # One-shot: rewrite legacy CLI auth-map rows into Grok2API import documents.
     # Safe to re-run — only touches rows that still look like the old map.
     try:
@@ -4650,6 +4652,7 @@ def import_auth_payload(raw: str | dict[str, Any], *, merge: bool = True) -> dic
     # Never persist mailbox JWTs / garbage as the account password.
     password = password_raw if is_plausible_account_password(password_raw) else ""
     sso = str(parsed.get("sso") or "")
+    proxy_url = str(parsed.get("proxy_url") or "").strip()
     auth_key = _auth_key(entry)
 
     init_db()
@@ -4669,9 +4672,10 @@ def import_auth_payload(raw: str | dict[str, Any], *, merge: bool = True) -> dic
             INSERT INTO accounts(
               email, password, sso, auth_key, user_id, access_token, refresh_token, id_token,
               expires_at, oidc_issuer, oidc_client_id, grok2api_auth_path, cpa_auth_path,
-              grok2api_auth_json, cpa_auth_json, status, batch_id, session_id, created_at, updated_at, raw_json
+              grok2api_auth_json, cpa_auth_json, status, batch_id, session_id, proxy_url,
+              created_at, updated_at, raw_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(email) DO UPDATE SET
               password = CASE
                 WHEN excluded.password != '' THEN excluded.password
@@ -4691,6 +4695,10 @@ def import_auth_payload(raw: str | dict[str, Any], *, merge: bool = True) -> dic
               status = excluded.status,
               batch_id = excluded.batch_id,
               session_id = excluded.session_id,
+              proxy_url = CASE
+                WHEN excluded.proxy_url != '' THEN excluded.proxy_url
+                ELSE accounts.proxy_url
+              END,
               updated_at = excluded.updated_at,
               raw_json = excluded.raw_json
             """,
@@ -4713,6 +4721,7 @@ def import_auth_payload(raw: str | dict[str, Any], *, merge: bool = True) -> dic
                 "registered",
                 str(parsed.get("batch_id") or ""),
                 str(parsed.get("session_id") or ""),
+                proxy_url,
                 created_at,
                 now,
                 auth_json,

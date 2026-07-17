@@ -2953,6 +2953,7 @@ def _run_registration(
                 "sso": sso,
                 "batch_id": sess.get("batch_id") or "",
                 "session_id": sid,
+                "proxy_url": sess.get("proxy") or "",
             },
             merge=True,
         )
