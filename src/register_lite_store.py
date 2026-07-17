@@ -3622,7 +3622,7 @@ def _auth_parts(
     with _connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT email, {json_column} AS auth_json, {path_column} AS auth_path
+            SELECT email, {json_column} AS auth_json, {path_column} AS auth_path, proxy_url
             FROM accounts
             WHERE {' AND '.join('(' + clause + ')' for clause in where)}
             ORDER BY updated_at DESC
@@ -3638,14 +3638,27 @@ def _auth_parts(
         filename = _auth_part_filename(email, cpa=cpa)
         if filename in seen:
             continue
+        proxy_url = str(row["proxy_url"] or "").strip() if cpa else ""
         content = str(row["auth_json"] or "").strip()
         if content:
-            payload = json.dumps(json.loads(content), ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+            doc = json.loads(content)
+            if proxy_url and isinstance(doc, dict):
+                doc["proxy_url"] = proxy_url
+            payload = json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
         else:
             path = Path(str(row["auth_path"] or ""))
             if not path.is_file():
                 continue
-            payload = path.read_bytes()
+            raw = path.read_bytes()
+            if proxy_url:
+                try:
+                    doc = json.loads(raw.decode("utf-8"))
+                    if isinstance(doc, dict):
+                        doc["proxy_url"] = proxy_url
+                        raw = json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+                except (ValueError, UnicodeDecodeError):
+                    pass  # 非 JSON 文件原样上传
+            payload = raw
             filename = path.name or filename
         seen.add(filename)
         parts.append((filename, payload))

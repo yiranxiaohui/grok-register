@@ -50,8 +50,46 @@ def test_import_no_proxy_field_is_empty():
         row = conn.execute("SELECT proxy_url FROM accounts WHERE email=?", (email,)).fetchone()
     assert (row["proxy_url"] or "") == "", row["proxy_url"]
 
+def _has_top_level_proxy(parts, filename_contains):
+    for name, payload in parts:
+        if filename_contains in name:
+            doc = json.loads(payload.decode("utf-8"))
+            return doc.get("proxy_url")
+    return "___not_found___"
+
+def test_cpa_parts_inject_proxy_url():
+    store.init_db()
+    email = "d@example.com"
+    store.import_auth_payload(_payload(email, "http://10.0.0.9:3128"))
+    parts = store.list_cpa_auth_parts(emails=[email])
+    got = _has_top_level_proxy(parts, "d")
+    assert got == "http://10.0.0.9:3128", got
+
+def test_cpa_parts_omit_empty_proxy():
+    store.init_db()
+    email = "e@example.com"
+    p = _payload(email, "")
+    del p["proxy_url"]
+    store.import_auth_payload(p)
+    parts = store.list_cpa_auth_parts(emails=[email])
+    got = _has_top_level_proxy(parts, "e")
+    # 空代理时不应有 proxy_url 键（get 返回 None）
+    assert got is None, got
+
+def test_grok2api_parts_never_inject_proxy():
+    store.init_db()
+    email = "f@example.com"
+    store.import_auth_payload(_payload(email, "http://10.0.0.9:3128"))
+    parts = store.list_grok2api_auth_parts(emails=[email])
+    got = _has_top_level_proxy(parts, "f")
+    # grok2api 文档不应含 proxy_url
+    assert got is None, got
+
 if __name__ == "__main__":
     test_import_writes_proxy_url_column()
     test_reimport_empty_proxy_preserves_existing()
     test_import_no_proxy_field_is_empty()
-    print("TASK1 OK")
+    test_cpa_parts_inject_proxy_url()
+    test_cpa_parts_omit_empty_proxy()
+    test_grok2api_parts_never_inject_proxy()
+    print("ALL OK")
