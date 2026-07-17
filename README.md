@@ -6,8 +6,8 @@ Grok 注册机——自有源码结构。基于 `grok-register-lite`，前端后
 
 - **`src/`** — FastAPI 后端 + 内嵌 Camoufox 过盾（`turnstile-solver/`）+ `grok-build-auth` 子模块。应用说明见 [src/README.md](src/README.md)。
 - **`web/`** — React 19 + Vite + TypeScript 后台前端。开发/构建说明见 [web/README.md](web/README.md)。构建产物输出到 `src/static/admin/`，由后端直接服务。
-- **`docker-compose.yml`** — 部署编排（挂载 `./data`、映射端口、过盾环境变量）。
-- **`.env.example`** — 环境变量模板，复制为 `.env` 使用。
+- **`docker-compose.yml`** — 部署编排。所有配置读自 `.env`（`env_file`），compose 本身只保留端口映射、数据卷等结构性设置。
+- **`.env.example`** — 全部环境变量的模板（含常用 / 进阶 / 内部固定三档分组），复制为 `.env` 使用。改配置 = 改 `.env` 后 `docker compose up -d` 重启。
 
 支持的邮箱服务商：MoeMail / YYDS / GPTMail / Cloudflare Temp Email / DuckMail / **AnyMail**。
 
