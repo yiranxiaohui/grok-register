@@ -470,7 +470,7 @@ export function AccountsView() {
     const deleted = data.deleted || 0;
     const skipped = (data.skipped && data.skipped.length) || 0;
     const failed = (data.failed && data.failed.length) || 0;
-    setStatusBadge({ text: `CPA 异常删除：成功 ${deleted}，跳过 ${skipped}，失败 ${failed}`, kind: data.ok ? "ok" : "warn" });
+    setStatusBadge({ text: `CPA 异常删除：成功 ${deleted}，跳过 ${skipped}，失败 ${failed}`, kind: data.ok && !failed ? "ok" : "warn" });
     setSelected(new Set());
     toast("已删除 CPA 异常：" + deleted);
     await refresh();

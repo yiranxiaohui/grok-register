@@ -287,6 +287,7 @@ def get_schedule_runtime() -> dict[str, Any]:
         "sticky_proxy": str(raw.get("sticky_proxy") or ""),
         "sticky_domain": str(raw.get("sticky_domain") or ""),
         "healthy_since": float(raw.get("healthy_since") or 0),
+        "last_cpa_auto_delete_at": float(raw.get("last_cpa_auto_delete_at") or 0),
     }
 
 
