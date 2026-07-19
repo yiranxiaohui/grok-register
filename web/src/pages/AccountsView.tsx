@@ -454,6 +454,28 @@ export function AccountsView() {
     await refresh();
   };
 
+  const deleteCpaAbnormalSelected = async () => {
+    const emails = selectedEmails();
+    if (!emails.length) {
+      toast("先选择账号");
+      return;
+    }
+    if (!confirm("删除选中账号在 CPA 上的异常 auth 并清理本地？\n只处理异常状态（需重登/额度用尽/权限拒绝），健康账号会跳过。删除前自动备份。")) return;
+    setStatusBadge({ text: "删除 CPA 异常中", kind: "warn" });
+    const data = await api<any>(adminUrl("api", "cpa", "delete-abnormal"), {
+      method: "POST",
+      body: JSON.stringify({ emails }),
+    });
+    setLogData(data);
+    const deleted = data.deleted || 0;
+    const skipped = (data.skipped && data.skipped.length) || 0;
+    const failed = (data.failed && data.failed.length) || 0;
+    setStatusBadge({ text: `CPA 异常删除：成功 ${deleted}，跳过 ${skipped}，失败 ${failed}`, kind: data.ok ? "ok" : "warn" });
+    setSelected(new Set());
+    toast("已删除 CPA 异常：" + deleted);
+    await refresh();
+  };
+
   const pullRemote = async (mode: "full" | "problems") => {
     const isFull = mode === "full";
     setStatusBadge({ text: isFull ? "拉取远端全部中" : "拉取远端异常中", kind: "warn" });
@@ -662,6 +684,7 @@ export function AccountsView() {
             <button className="btn" type="button" onClick={() => run(uploadSelectedCpa)}>CPA 导入</button>
             <button className="btn primary" type="button" onClick={() => run(reloginSelected)}>重登</button>
             <button className="btn danger" type="button" onClick={() => run(deleteSelected)}>删除选中</button>
+            <button className="btn danger" type="button" onClick={() => run(deleteCpaAbnormalSelected)}>删除 CPA 异常</button>
           </div>
         </div>
 
