@@ -468,6 +468,8 @@ class CpaConfigBody(BaseModel):
     limit: int | None = None
     auto_upload_after_probe: bool | None = None
     auto_upload_after_relogin: bool | None = None
+    auto_delete_abnormal: bool | None = None
+    auto_delete_min_interval_sec: int | None = None
 
 
 

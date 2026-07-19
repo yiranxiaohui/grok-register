@@ -27,6 +27,31 @@ def test_config_normalizes_auto_delete():
     assert cfg["auto_delete_min_interval_sec"] == 60, cfg
 
 
+def test_cpa_config_body_includes_auto_delete_fields():
+    """Regression: API body must accept auto_delete_* or UI checkbox cannot persist."""
+    from register_lite_app import CpaConfigBody
+
+    body = CpaConfigBody(
+        base_url="https://10.0.0.1:8317",
+        management_key="secret",
+        limit=1000,
+        auto_upload_after_probe=True,
+        auto_upload_after_relogin=True,
+        auto_delete_abnormal=True,
+        auto_delete_min_interval_sec=120,
+    )
+    dumped = body.model_dump(exclude_none=False)
+    assert dumped["auto_delete_abnormal"] is True, dumped
+    assert dumped["auto_delete_min_interval_sec"] == 120, dumped
+
+    # Simulate PUT path: body dump -> set_cpa_config
+    cfg = store.set_cpa_config(dumped, replace=True)
+    assert cfg["auto_delete_abnormal"] is True, cfg
+    loaded = store.get_cpa_config(include_key=True)
+    assert loaded["auto_delete_abnormal"] is True, loaded
+
+
+
 # ---------- Task 2: CPA 删除 HTTP 层 ----------
 
 import io
@@ -340,6 +365,7 @@ def test_auto_delete_respects_min_interval():
 if __name__ == "__main__":
     test_config_defaults_auto_delete_off()
     test_config_normalizes_auto_delete()
+    test_cpa_config_body_includes_auto_delete_fields()
     test_delete_http_2xx_ok()
     test_delete_http_uses_query_and_delete_method()
     test_delete_http_404_is_ok()
