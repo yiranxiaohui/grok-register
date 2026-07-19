@@ -2559,7 +2559,7 @@ async def sync_grok2api_remote_status(body: Grok2ApiRemoteStatusBody):
     """Pull remote status from the exclusive backend (Grok2API or CPA).
 
     Kept under the historical grok2api path so existing UI buttons keep working.
-    When remote_backend=cpa, routes to grok-inspection plugin status.
+    When remote_backend=cpa, routes to CPA native auth-files status.
     """
     try:
         return await asyncio.to_thread(
@@ -2608,7 +2608,7 @@ async def put_remote_backend(body: RemoteBackendBody):
 
 @app.post(_admin_path('api', 'cpa', 'remote-status'))
 async def sync_cpa_remote_status(body: Grok2ApiRemoteStatusBody):
-    """Explicit CPA grok-inspection pull (same payload as unified remote-status)."""
+    """Explicit CPA auth-files pull (same payload as unified remote-status)."""
     try:
         return await asyncio.to_thread(
             lite_store.sync_cpa_remote_status,

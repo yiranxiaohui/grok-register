@@ -1971,7 +1971,7 @@ def get_remote_backend(*, resolve: bool = True) -> str:
 
     When ``resolve`` is True and no explicit switch is stored, infer from which
     side has auto-import enabled **and** is fully configured. CPA wins only when
-    it is the sole ready/auto side (matches the old grok_reg inspection workflow).
+    it is the sole ready/auto side (matches the exclusive remote-backend workflow).
     """
     stored = normalize_remote_backend(_json_setting("remote_backend"))
     if stored:
@@ -2142,7 +2142,7 @@ def normalize_cpa_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     del_interval = max(60, min(86400, del_interval))
     base_raw = str(src.get("base_url") or "").strip()
     # Accept management UI URLs like
-    # https://cpa.example/management.html#/plugin-pages/grok-inspection/0
+    # https://cpa.example/management.html  (origin only is stored)
     # and reduce them to origin (scheme + host).
     try:
         base_url = _normalize_origin(base_raw) if base_raw else ""
@@ -3113,7 +3113,7 @@ def _record_classified_remote_accounts(
     seen_at: float,
     mode: str = "full",
 ) -> int:
-    """Write already-classified remote rows (CPA grok-inspection / custom)."""
+    """Write already-classified remote rows (CPA auth-files / custom)."""
     init_db()
     mode_norm = str(mode or "full").strip().lower()
     if mode_norm in {"all", "full", "mirror", "complete"}:
@@ -3126,29 +3126,37 @@ def _record_classified_remote_accounts(
         for item in rows:
             if not isinstance(item, dict):
                 continue
-            # Accept either pre-classified shape or raw inspection rows.
+            # Accept either pre-classified shape or raw CPA auth-file rows.
             if item.get("classification") or item.get("action") or item.get("http_status") is not None:
+                email = str(item.get("email") or "").strip().lower()
+                if "@" not in email:
+                    email = _cpa_email_from_auth_row(item)
+                file_name = str(
+                    item.get("file_name")
+                    or item.get("name")
+                    or item.get("file_id")
+                    or item.get("auth_index")
+                    or ""
+                ).strip()
                 classified = {
-                    "email": str(item.get("email") or item.get("name") or "").strip().lower(),
+                    "email": email,
                     "classification": str(item.get("classification") or ""),
                     "http_status": item.get("http_status"),
                     "action": str(item.get("action") or ""),
                     "reason": str(item.get("reason") or item.get("status_message") or ""),
-                    "auth_status": str(item.get("auth_status") or item.get("authStatus") or ""),
+                    "auth_status": str(item.get("auth_status") or item.get("authStatus") or item.get("status") or ""),
                     "disabled": item.get("disabled"),
                     "model": str(item.get("model") or ""),
                     "remote_id": str(
                         item.get("remote_id")
-                        or item.get("auth_index")
-                        or item.get("file_name")
-                        or item.get("file_id")
-                        or item.get("email")
-                        or item.get("name")
+                        or file_name
+                        or item.get("id")
+                        or email
                         or ""
                     ),
                 }
             else:
-                classified = classify_cpa_inspection_result(item)
+                classified = classify_cpa_auth_file(item)
             if _upsert_remote_account_row(
                 conn,
                 provider=provider,
@@ -3161,31 +3169,132 @@ def _record_classified_remote_accounts(
     return written
 
 
-def classify_cpa_inspection_result(row: dict[str, Any]) -> dict[str, Any]:
-    """Map CPA grok-inspection plugin result → remote_accounts shape."""
-    email = str(row.get("email") or row.get("name") or "").strip().lower()
-    classification = str(row.get("classification") or "").strip().lower()
-    reason = str(row.get("reason") or row.get("status_message") or row.get("message") or "").strip()
+def _cpa_email_from_auth_row(row: dict[str, Any]) -> str:
+    """Extract email from a CPA auth-files row (never treat filename as email)."""
+    for key in ("email", "account"):
+        value = str(row.get(key) or "").strip().lower()
+        if "@" in value:
+            return value
+    name = str(row.get("name") or row.get("file_name") or "").strip()
+    base = name
+    if base.lower().endswith(".json"):
+        base = base[:-5]
+    if base.lower().startswith("xai-"):
+        base = base[4:]
+    base = base.strip().lower()
+    return base if "@" in base else ""
+
+
+def _cpa_file_name_from_auth_row(row: dict[str, Any]) -> str:
+    name = str(row.get("file_name") or row.get("name") or "").strip()
+    if name:
+        return name
+    email = _cpa_email_from_auth_row(row)
+    return _auth_part_filename(email, cpa=True) if email else ""
+
+
+def classify_cpa_auth_file(row: dict[str, Any]) -> dict[str, Any]:
+    """Map CPA native ``/v0/management/auth-files`` entry → remote_accounts shape."""
+    email = _cpa_email_from_auth_row(row)
+    file_name = _cpa_file_name_from_auth_row(row)
+    status = str(row.get("status") or row.get("auth_status") or row.get("authStatus") or "").strip().lower()
+    reason = str(
+        row.get("reason")
+        or row.get("status_message")
+        or row.get("message")
+        or ""
+    ).strip()
+    reason_l = reason.lower()
     action_raw = str(row.get("action") or "").strip().lower()
     model = str(row.get("model") or "").strip()
-    file_name = str(row.get("file_name") or row.get("file_id") or row.get("auth_index") or "").strip()
-    disabled = row.get("disabled")
+    disabled_raw = row.get("disabled")
+    unavailable = bool(row.get("unavailable"))
     try:
         http_status = int(row.get("http_status") or 0) or None
     except Exception:
         http_status = None
 
-    # Normalize common plugin labels.
-    if classification in {"ok", "active", "good", "pass", "passed"}:
+    classification = str(row.get("classification") or "").strip().lower()
+
+    # Normalize explicit labels (kept for tests / pre-classified rows).
+    if classification in {"ok", "active", "good", "pass", "passed", "healthy"}:
         classification = "healthy"
-    if classification in {"need_reauth", "need-reauth", "relogin", "unauthorized", "token_expired"}:
+    elif classification in {"need_reauth", "need-reauth", "relogin", "unauthorized", "token_expired", "reauth"}:
         classification = "reauth"
-    if classification in {"quota", "rate_limit", "ratelimited", "waiting_reset", "waitingreset"}:
+    elif classification in {"quota", "rate_limit", "ratelimited", "waiting_reset", "waitingreset", "quota_exhausted"}:
         classification = "quota_exhausted"
-    if classification in {"error", "fail", "failed", "probe-error"}:
+    elif classification in {"error", "fail", "failed", "probe-error", "probe_error"}:
         classification = "probe_error"
+    elif classification in {"disabled"}:
+        classification = "disabled"
+    elif classification in {"permission_denied", "forbidden"}:
+        classification = "permission_denied"
+    else:
+        classification = ""
+
+    def _looks_reauth(text: str) -> bool:
+        return any(
+            token in text
+            for token in (
+                "unauthorized",
+                "unauthorised",
+                "401",
+                "token expired",
+                "token_expired",
+                "invalid_grant",
+                "invalid token",
+                "refresh failed",
+                "refresh_token",
+                "need reauth",
+                "need_reauth",
+                "relogin",
+                "login required",
+                "not authenticated",
+            )
+        )
+
+    def _looks_quota(text: str) -> bool:
+        return any(
+            token in text
+            for token in (
+                "quota",
+                "rate limit",
+                "rate_limit",
+                "ratelimit",
+                "too many",
+                "429",
+                "cooling",
+                "cooldown",
+                "resource exhausted",
+                "usage limit",
+                "limit exceeded",
+            )
+        )
+
+    def _looks_permission(text: str) -> bool:
+        return any(token in text for token in ("403", "forbidden", "permission", "access denied"))
+
     if not classification:
-        if http_status == 401:
+        if disabled_raw is True or status in {"disabled"}:
+            classification = "disabled"
+        elif status in {"ok", "active", "healthy", "ready", "good"} and not unavailable:
+            classification = "healthy"
+        elif _looks_reauth(reason_l) or status in {"unauthorized", "reauth", "need_reauth"}:
+            classification = "reauth"
+        elif _looks_quota(reason_l) or status in {"quota", "cooling", "cooldown", "rate_limited"}:
+            classification = "quota_exhausted"
+        elif unavailable and (row.get("next_retry_after") or _looks_quota(reason_l)):
+            classification = "quota_exhausted"
+        elif _looks_permission(reason_l) or status in {"forbidden"}:
+            classification = "permission_denied"
+        elif status in {"error", "fail", "failed"} or unavailable:
+            if _looks_reauth(reason_l):
+                classification = "reauth"
+            elif _looks_quota(reason_l):
+                classification = "quota_exhausted"
+            else:
+                classification = "probe_error"
+        elif http_status == 401:
             classification = "reauth"
         elif http_status == 403:
             classification = "permission_denied"
@@ -3193,10 +3302,12 @@ def classify_cpa_inspection_result(row: dict[str, Any]) -> dict[str, Any]:
             classification = "quota_exhausted"
         elif http_status is not None and http_status >= 500:
             classification = "probe_error"
-        elif http_status in (None, 200):
+        elif http_status in (None, 200) and not unavailable and not disabled_raw:
             classification = "healthy"
-        else:
+        elif http_status is not None:
             classification = f"http_{http_status}"
+        else:
+            classification = "unknown"
 
     if action_raw in {"keep", "ok", "active", "relogin", "wait", "inspect", "enable_or_ignore"}:
         action = action_raw if action_raw != "ok" else "keep"
@@ -3217,18 +3328,30 @@ def classify_cpa_inspection_result(row: dict[str, Any]) -> dict[str, Any]:
         http_status = 429
     if classification == "permission_denied" and http_status is None:
         http_status = 403
+    if classification == "healthy" and http_status is None:
+        http_status = 200
+
+    disabled = None if disabled_raw is None else int(bool(disabled_raw))
+    if classification == "disabled" and disabled is None:
+        disabled = 1
 
     return {
         "email": email,
         "classification": classification or "unknown",
         "http_status": http_status,
         "action": action,
-        "reason": reason or classification or "inspection",
-        "auth_status": str(row.get("auth_status") or row.get("authStatus") or classification or ""),
-        "disabled": None if disabled is None else int(bool(disabled)),
+        "reason": reason or classification or "cpa_auth_files",
+        "auth_status": status or classification or "",
+        "disabled": disabled,
         "model": model,
+        "file_name": file_name,
         "remote_id": file_name or email or f"cpa-{hash(email) & 0xFFFFFFFF:x}",
     }
+
+
+# Backward-compatible alias for older callers/tests.
+def classify_cpa_inspection_result(row: dict[str, Any]) -> dict[str, Any]:
+    return classify_cpa_auth_file(row)
 
 
 def sync_grok2api_remote_status(
@@ -4074,26 +4197,22 @@ def _cpa_management_headers(cfg: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def fetch_cpa_grok_inspection_status(
+def fetch_cpa_auth_files(
     config: dict[str, Any] | None = None,
     *,
-    include_results: bool = True,
     timeout: float = 45.0,
 ) -> dict[str, Any]:
-    """GET CPA plugin ``/v0/management/plugins/grok-inspection/status``.
+    """GET CPA native ``/v0/management/auth-files``.
 
     Accepts management.html UI URLs; origin is already normalized in config.
+    Returns ``{"files": [...], "total": N}``.
     """
     cfg = normalize_cpa_config(config or get_cpa_config(include_key=True))
     if not cfg["base_url"]:
         raise ValueError("CPA 地址不能为空（可填 management.html 完整链接，会自动取域名）")
     if not cfg["management_key"]:
         raise ValueError("CPA 管理密钥不能为空")
-    flag = "1" if include_results else "0"
-    url = (
-        cfg["base_url"].rstrip("/")
-        + f"/v0/management/plugins/grok-inspection/status?include_results={flag}"
-    )
+    url = cfg["base_url"].rstrip("/") + "/v0/management/auth-files"
     req = urllib.request.Request(url, headers=_cpa_management_headers(cfg), method="GET")
     try:
         with _urlopen(req, timeout=timeout) as resp:
@@ -4104,7 +4223,7 @@ def fetch_cpa_grok_inspection_status(
         status = int(exc.code)
         if _is_cloudflare_block(raw):
             raise RuntimeError(
-                f"CPA grok-inspection 被 Cloudflare 拦截 HTTP {status}。"
+                f"CPA auth-files 被 Cloudflare 拦截 HTTP {status}。"
                 f" 请改用内网/直连地址。详情：{raw[:300]}"
             ) from exc
         if status in {401, 403}:
@@ -4112,33 +4231,82 @@ def fetch_cpa_grok_inspection_status(
                 f"CPA 管理密钥被拒绝 HTTP {status}（检查 management key 是否正确，"
                 f"不是 Grok2API 账号密码）。详情：{raw[:300]}"
             ) from exc
-        raise RuntimeError(f"CPA grok-inspection 拉取失败 HTTP {status}: {raw[:300]}") from exc
+        raise RuntimeError(f"CPA auth-files 拉取失败 HTTP {status}: {raw[:300]}") from exc
     if status >= 400:
-        raise RuntimeError(f"CPA grok-inspection 拉取失败 HTTP {status}: {raw[:300]}")
+        raise RuntimeError(f"CPA auth-files 拉取失败 HTTP {status}: {raw[:300]}")
     try:
         payload = json.loads(raw) if raw else {}
     except Exception as exc:
-        raise RuntimeError(f"CPA grok-inspection 返回非 JSON: {raw[:200]}") from exc
+        raise RuntimeError(f"CPA auth-files 返回非 JSON: {raw[:200]}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("CPA grok-inspection 返回格式无效")
+        raise RuntimeError("CPA auth-files 返回格式无效")
     # Some builds wrap under data.
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    return data if isinstance(data, dict) else payload
+    if not isinstance(data, dict):
+        data = payload if isinstance(payload, dict) else {}
+    files = data.get("files") if isinstance(data.get("files"), list) else None
+    if files is None and isinstance(data.get("items"), list):
+        files = data.get("items")
+    if files is None and isinstance(payload.get("files"), list):
+        files = payload.get("files")
+    if files is None:
+        files = []
+    files = [row for row in files if isinstance(row, dict)]
+    return {
+        "files": files,
+        "total": len(files),
+        "source": "auth-files",
+    }
+
+
+# Backward-compatible alias — old plugin endpoint removed.
+def fetch_cpa_grok_inspection_status(
+    config: dict[str, Any] | None = None,
+    *,
+    include_results: bool = True,
+    timeout: float = 45.0,
+) -> dict[str, Any]:
+    payload = fetch_cpa_auth_files(config, timeout=timeout)
+    files = payload.get("files") or []
+    return {
+        "files": files,
+        "results": files if include_results else [],
+        "items": files if include_results else [],
+        "total": int(payload.get("total") or len(files)),
+        "done": int(payload.get("total") or len(files)),
+        "running": False,
+        "source": "auth-files",
+    }
+
+
+def _is_cpa_xai_auth_file(row: dict[str, Any]) -> bool:
+    """Keep xAI/Grok auth files; drop unrelated CPA providers when possible."""
+    provider = str(row.get("type") or row.get("provider") or "").strip().lower()
+    name = str(row.get("name") or row.get("file_name") or "").strip().lower()
+    if provider in {"xai", "grok", "grok_build", "x-ai", "x_ai"}:
+        return True
+    if name.startswith("xai-") or name.startswith("grok-") or "xai-" in name:
+        return True
+    # Unknown provider but has a recognizable email — keep and let local match filter.
+    if not provider and _cpa_email_from_auth_row(row):
+        return True
+    # Empty provider + json name: include (disk fallback rows may lack type).
+    if not provider and name.endswith(".json"):
+        return True
+    return False
 
 
 def test_cpa_remote(config: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = normalize_cpa_config(config or get_cpa_config(include_key=True))
-    status_payload = fetch_cpa_grok_inspection_status(
-        cfg, include_results=False, timeout=30.0
-    )
+    payload = fetch_cpa_auth_files(cfg, timeout=30.0)
+    files = payload.get("files") or []
+    xai_files = [row for row in files if isinstance(row, dict) and _is_cpa_xai_auth_file(row)]
     return {
         "ok": True,
         "base_url": cfg["base_url"],
-        "plugin": "grok-inspection",
-        "done": status_payload.get("done"),
-        "total": status_payload.get("total"),
-        "running": status_payload.get("running"),
-        "finished_at": status_payload.get("finished_at"),
+        "source": "auth-files",
+        "total": len(files),
+        "xai_total": len(xai_files),
     }
 
 
@@ -4148,12 +4316,12 @@ def sync_cpa_remote_status(
     mode: str = "problems",
     timeout: float = 45.0,
 ) -> dict[str, Any]:
-    """Pull CPA grok-inspection results into local ``remote_accounts`` (provider=cpa).
+    """Pull CPA native auth-files status into local ``remote_accounts`` (provider=cpa).
 
     Same classification vocabulary as Grok2API so the accounts UI 远端状态 column
     works unchanged. ``mode``:
       - problems: only non-healthy rows (default, cheap)
-      - full: write every inspection result
+      - full: write every auth-file result
     """
     cfg = normalize_cpa_config(config or get_cpa_config(include_key=True))
     mode_norm = str(mode or "problems").strip().lower()
@@ -4162,10 +4330,8 @@ def sync_cpa_remote_status(
     else:
         mode_norm = "problems"
 
-    status_payload = fetch_cpa_grok_inspection_status(
-        cfg, include_results=True, timeout=timeout
-    )
-    raw_results = status_payload.get("results") or status_payload.get("items") or []
+    payload = fetch_cpa_auth_files(cfg, timeout=timeout)
+    raw_results = payload.get("files") or []
     if not isinstance(raw_results, list):
         raw_results = []
 
@@ -4174,7 +4340,10 @@ def sync_cpa_remote_status(
     for row in raw_results:
         if not isinstance(row, dict):
             continue
-        classified = classify_cpa_inspection_result(row)
+        if not _is_cpa_xai_auth_file(row):
+            counts["skipped_non_xai"] += 1
+            continue
+        classified = classify_cpa_auth_file(row)
         if not classified.get("email"):
             counts["skipped_no_email"] += 1
             continue
@@ -4182,8 +4351,14 @@ def sync_cpa_remote_status(
         if mode_norm == "problems" and cls == "healthy":
             counts["skipped_healthy"] += 1
             continue
-        # Keep raw fields for debugging.
-        classified_rows.append({**row, **classified})
+        # Ensure delete path can read file_name from raw_json.
+        merged = {
+            **row,
+            **classified,
+            "file_name": classified.get("file_name") or _cpa_file_name_from_auth_row(row),
+            "name": row.get("name") or classified.get("file_name") or "",
+        }
+        classified_rows.append(merged)
         counts["total"] += 1
         counts[f"classification:{cls}"] += 1
         counts[f"action:{classified.get('action') or 'unknown'}"] += 1
@@ -4219,12 +4394,12 @@ def sync_cpa_remote_status(
             ).fetchone()["n"]
         )
 
-    inventory_total = int(status_payload.get("total") or counts["total"] or written)
+    inventory_total = int(payload.get("total") or counts["total"] or written)
     summary = {
         "ok": True,
         "backend": "cpa",
         "base_url": cfg["base_url"],
-        "plugin": "grok-inspection",
+        "source": "auth-files",
         "mode": mode_norm,
         "provider_counts": {"cpa": written},
         "counts": dict(sorted(counts.items())),
@@ -4232,11 +4407,9 @@ def sync_cpa_remote_status(
         "problem_total": written if mode_norm == "problems" else None,
         "remote_inventory_total": inventory_total,
         "remote_summary": {
-            "total": status_payload.get("total"),
-            "done": status_payload.get("done"),
-            "running": status_payload.get("running"),
-            "finished_at": status_payload.get("finished_at"),
-            "store_path": status_payload.get("store_path"),
+            "total": payload.get("total"),
+            "xai_written": written,
+            "source": "auth-files",
         },
         "local_total": local_total,
         "matched_local": matched,
@@ -5865,7 +6038,12 @@ def _cpa_file_name_for_email(conn, email: str) -> tuple[str, str]:
     if row and row["raw_json"]:
         try:
             raw = json.loads(row["raw_json"])
-            file_name = str(raw.get("file_name") or "").strip()
+            file_name = str(
+                raw.get("file_name")
+                or raw.get("name")
+                or raw.get("remote_id")
+                or ""
+            ).strip()
         except Exception:  # noqa: BLE001
             file_name = ""
     if not file_name:

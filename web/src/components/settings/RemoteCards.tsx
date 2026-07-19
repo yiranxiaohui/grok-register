@@ -241,7 +241,7 @@ export function RemoteCards() {
     const data = await api<any>(adminUrl("api", "cpa", "test"), { method: "POST", body: JSON.stringify(cpaPayload()) });
     setCStatus({ text: data.ok ? "测试通过" : "测试失败", kind: data.ok ? "ok" : "bad", show: true });
     setCLog(data);
-    toast(data.ok ? "CPA grok-inspection 可用" + (data.total != null ? " · total " + data.total : "") : data.error || data.message || "CPA 测试失败");
+    toast(data.ok ? "CPA auth-files 可用" + (data.total != null ? " · total " + data.total : "") + (data.xai_total != null ? " · xai " + data.xai_total : "") : data.error || data.message || "CPA 测试失败");
   };
 
   return (
@@ -262,7 +262,7 @@ export function RemoteCards() {
             <select id="remote_backend" value={backend} onChange={(e) => setBackend(e.target.value as Backend)}>
               <option value="">自动推断（看哪边开了自动导入）</option>
               <option value="grok2api">Grok2API</option>
-              <option value="cpa">CPA（grok-inspection）</option>
+              <option value="cpa">CPA（auth-files）</option>
             </select>
           </div>
         </div>
@@ -361,7 +361,7 @@ export function RemoteCards() {
             <input id="cpa_limit" type="number" min={1} max={5000} value={c.limit ?? 1000} onChange={(e) => setC({ ...c, limit: Number(e.target.value) })} />
           </div>
         </div>
-        <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>状态来自 <code>/v0/management/plugins/grok-inspection/status</code>；可直接粘贴 management.html 链接，保存时会自动取域名。</p>
+        <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>状态来自 CPA 原生 <code>/v0/management/auth-files</code>；可直接粘贴 management.html 链接，保存时会自动取域名。</p>
         {cStatus.show && <Badge kind={cStatus.kind}>{cStatus.text}</Badge>}
         {cLog != null && <Terminal content={renderLog("cpa-log", cLog)} />}
       </div>
