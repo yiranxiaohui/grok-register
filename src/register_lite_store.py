@@ -4023,6 +4023,45 @@ def _upload_cpa_auth_file(path: Path, cfg: dict[str, Any], *, timeout: float = 3
     return _upload_cpa_auth_part(path.name, path.read_bytes(), cfg, timeout=timeout)
 
 
+def _delete_cpa_auth_file_by_name(
+    file_name: str, cfg: dict[str, Any], *, timeout: float = 30.0
+) -> dict[str, Any]:
+    """DELETE /v0/management/auth-files?name=<file_name>.
+
+    404 视为幂等成功（远端本就没有该 auth）。返回:
+      成功: {"ok": True, "status": <int>, "name": file_name[, "note": ...]}
+      失败: {"ok": False, "status": <int>, "name": file_name, "error": <str>}
+    """
+    name = str(file_name or "").strip()
+    if not name:
+        return {"ok": False, "status": 0, "name": name, "error": "空文件名"}
+    endpoint = (
+        cfg["base_url"].rstrip("/")
+        + "/v0/management/auth-files?"
+        + urllib.parse.urlencode({"name": name})
+    )
+    req = urllib.request.Request(
+        endpoint, headers=_cpa_management_headers(cfg), method="DELETE"
+    )
+    try:
+        with _urlopen(req, timeout=timeout) as resp:
+            status = int(resp.status)
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        body = exc.read().decode("utf-8", errors="replace")
+        if status == 404:
+            return {"ok": True, "status": 404, "name": name, "note": "远端本就不存在"}
+        return {"ok": False, "status": status, "name": name, "error": body.strip()[:300]}
+    except Exception as exc:  # noqa: BLE001 — 网络/超时等
+        return {"ok": False, "status": 0, "name": name, "error": str(exc)[:300]}
+    if 200 <= status < 300:
+        return {"ok": True, "status": status, "name": name}
+    if status == 404:
+        return {"ok": True, "status": 404, "name": name, "note": "远端本就不存在"}
+    return {"ok": False, "status": status, "name": name, "error": f"HTTP {status}"}
+
+
 def _cpa_management_headers(cfg: dict[str, Any]) -> dict[str, str]:
     return {
         "Accept": "application/json",
