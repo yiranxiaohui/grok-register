@@ -24,6 +24,8 @@ interface CpaCfg {
   limit?: number;
   auto_upload_after_probe?: boolean;
   auto_upload_after_relogin?: boolean;
+  auto_delete_abnormal?: boolean;
+  auto_delete_min_interval_sec?: number;
 }
 
 const isMask = (v: string) => /^\*+$/.test(String(v || "").trim());
@@ -45,6 +47,7 @@ export function RemoteCards() {
   const [c, setC] = useState<CpaCfg>({ limit: 1000 });
   const [cProbe, setCProbe] = useState(false);
   const [cRelogin, setCRelogin] = useState(false);
+  const [cAutoDelete, setCAutoDelete] = useState(false);
   const [cStatus, setCStatus] = useState<{ text: string; kind: "" | "ok" | "warn" | "bad"; show: boolean }>({ text: "待机", kind: "", show: false });
   const [cLog, setCLog] = useState<unknown>(null);
 
@@ -114,6 +117,7 @@ export function RemoteCards() {
     });
     setCProbe(!!cfg.auto_upload_after_probe);
     setCRelogin(!!cfg.auto_upload_after_relogin);
+    setCAutoDelete(!!cfg.auto_delete_abnormal);
   }, []);
 
   const loadBackend = useCallback(async () => {
@@ -171,6 +175,7 @@ export function RemoteCards() {
       limit: c.limit ?? 1000,
       auto_upload_after_probe: cProbe,
       auto_upload_after_relogin: cRelogin,
+      auto_delete_abnormal: cAutoDelete,
     };
   };
 
@@ -331,7 +336,12 @@ export function RemoteCards() {
               <input type="checkbox" checked={cRelogin} onChange={(e) => { setCRelogin(e.target.checked); enforceExclusive("cpa", { cr: e.target.checked }); }} />
               重登测活通过后自动导入
             </label>
+            <label className="header-check" title="调度每轮先拉取 CPA 异常状态，再自动删除异常账号（远端 auth + 本地记录，带备份）">
+              <input type="checkbox" checked={cAutoDelete} onChange={(e) => setCAutoDelete(e.target.checked)} />
+              自动删除异常账号（需重登 / 额度用尽 / 权限拒绝）
+            </label>
           </div>
+          <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>开启后调度每轮会先拉取 CPA 异常状态，再自动删除异常账号（远端 + 本地，带备份）。额度用尽类账号 24h 后会自行恢复，请谨慎开启。默认关闭。</p>
           <div className="actions">
             <button className="btn" type="button" onClick={() => run(saveCpa, "c")}>保存</button>
             <button className="btn" type="button" onClick={() => run(testCpa, "c")}>测试</button>
