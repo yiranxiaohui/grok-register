@@ -267,6 +267,76 @@ def test_delete_mixed_batch():
     assert _account_exists("m_fail@ex.com")
 
 
+# ---------- Task 5: 自动删除接入调度 ----------
+
+def test_auto_delete_disabled_by_default():
+    orig_cfg = store.get_cpa_config
+    store.get_cpa_config = lambda *a, **k: store.normalize_cpa_config(
+        {"base_url": "https://cpa.example", "management_key": "mk",
+         "auto_delete_abnormal": False}
+    )
+    orig_backend = store.get_remote_backend
+    store.get_remote_backend = lambda *a, **k: "cpa"
+    try:
+        assert store._cpa_auto_delete_enabled() is False
+    finally:
+        store.get_cpa_config = orig_cfg
+        store.get_remote_backend = orig_backend
+
+
+def test_auto_delete_enabled_when_on_and_cpa_backend():
+    orig_cfg = store.get_cpa_config
+    store.get_cpa_config = lambda *a, **k: store.normalize_cpa_config(
+        {"base_url": "https://cpa.example", "management_key": "mk",
+         "auto_delete_abnormal": True}
+    )
+    orig_backend = store.get_remote_backend
+    store.get_remote_backend = lambda *a, **k: "cpa"
+    try:
+        assert store._cpa_auto_delete_enabled() is True
+    finally:
+        store.get_cpa_config = orig_cfg
+        store.get_remote_backend = orig_backend
+
+
+def test_auto_delete_off_when_backend_pinned_grok2api():
+    orig_cfg = store.get_cpa_config
+    store.get_cpa_config = lambda *a, **k: store.normalize_cpa_config(
+        {"base_url": "https://cpa.example", "management_key": "mk",
+         "auto_delete_abnormal": True}
+    )
+    orig_backend = store.get_remote_backend
+    store.get_remote_backend = lambda *a, **k: "grok2api"
+    try:
+        assert store._cpa_auto_delete_enabled() is False
+    finally:
+        store.get_cpa_config = orig_cfg
+        store.get_remote_backend = orig_backend
+
+
+def test_auto_delete_respects_min_interval():
+    store.init_db()
+    orig_cfg = store.get_cpa_config
+    store.get_cpa_config = lambda *a, **k: store.normalize_cpa_config(
+        {"base_url": "https://cpa.example", "management_key": "mk",
+         "auto_delete_abnormal": True, "auto_delete_min_interval_sec": 300}
+    )
+    orig_backend = store.get_remote_backend
+    store.get_remote_backend = lambda *a, **k: "cpa"
+    called = {"sync": 0}
+    orig_sync = store.sync_cpa_remote_status
+    store.sync_cpa_remote_status = lambda *a, **k: called.__setitem__("sync", called["sync"] + 1) or {}
+    store.set_schedule_runtime({"last_cpa_auto_delete_at": _time.time()})  # 刚删过
+    try:
+        actions = []
+        store._maybe_auto_delete_cpa_abnormal(_time.time(), actions)
+        assert called["sync"] == 0, "未到最小间隔不应拉取"
+    finally:
+        store.get_cpa_config = orig_cfg
+        store.get_remote_backend = orig_backend
+        store.sync_cpa_remote_status = orig_sync
+
+
 if __name__ == "__main__":
     test_config_defaults_auto_delete_off()
     test_config_normalizes_auto_delete()
@@ -282,4 +352,8 @@ if __name__ == "__main__":
     test_delete_file_name_fallback_when_missing()
     test_delete_empty_emails()
     test_delete_mixed_batch()
+    test_auto_delete_disabled_by_default()
+    test_auto_delete_enabled_when_on_and_cpa_backend()
+    test_auto_delete_off_when_backend_pinned_grok2api()
+    test_auto_delete_respects_min_interval()
     print("ALL OK")

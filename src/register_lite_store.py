@@ -1047,6 +1047,9 @@ def evaluate_schedule_tick(
                         )
                         actions.append({"type": "throttle", **{k: th.get(k) for k in ("throttled", "actions", "skipped")}})
 
+    # 1.5) CPA 自动删除异常（独立于注册调度：即使 disabled/窗口外也照跑）。
+    _maybe_auto_delete_cpa_abnormal(now, actions)
+
     # 2) System resource guard — also applies while manual high-concurrency runs.
     running = _registration_running_now()
     if policy.get("sys_guard_enabled") and sys_load.get("ok"):
@@ -5931,6 +5934,53 @@ def delete_cpa_abnormal(
         "failed": failed,
         "backup_path": backup_path,
     }
+
+
+def _cpa_auto_delete_enabled() -> bool:
+    """自动删除是否应运行：开关开 + CPA 配置完整 + 未被 pin 到 grok2api。"""
+    try:
+        cfg = get_cpa_config(include_key=True)
+    except Exception:  # noqa: BLE001
+        return False
+    if not bool(cfg.get("auto_delete_abnormal")):
+        return False
+    if not cfg.get("base_url") or not cfg.get("management_key"):
+        return False
+    try:
+        if get_remote_backend(resolve=False) == "grok2api":
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+def _maybe_auto_delete_cpa_abnormal(now: float, actions: list[dict[str, Any]]) -> None:
+    """调度 tick 调用：限流 → 拉最新 CPA 异常 → 严格联动删。全程隔离，只 append action。"""
+    if not _cpa_auto_delete_enabled():
+        return
+    try:
+        cfg = get_cpa_config(include_key=True)
+        min_interval = int(cfg.get("auto_delete_min_interval_sec") or 300)
+        rt = get_schedule_runtime()
+        last = float(rt.get("last_cpa_auto_delete_at") or 0)
+        if last > 0 and (now - last) < min_interval:
+            return
+        set_schedule_runtime({"last_cpa_auto_delete_at": now})
+        sync_cpa_remote_status(mode="problems")
+        emails = _abnormal_emails_from_remote()
+        if not emails:
+            actions.append({"type": "cpa_auto_delete", "deleted": 0, "checked": 0})
+            return
+        res = delete_cpa_abnormal(emails, config=cfg)
+        actions.append({
+            "type": "cpa_auto_delete",
+            "deleted": int(res.get("deleted") or 0),
+            "checked": len(emails),
+            "skipped": len(res.get("skipped") or []),
+            "failed": len(res.get("failed") or []),
+        })
+    except Exception as exc:  # noqa: BLE001
+        actions.append({"type": "cpa_auto_delete_error", "error": str(exc)[:200]})
 
 
 def _save_probe_result(email: str, result: dict[str, Any]) -> None:
