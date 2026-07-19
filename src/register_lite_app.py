@@ -476,6 +476,10 @@ class CpaUploadBody(BaseModel):
     emails: list[str] | None = None
 
 
+class DeleteCpaAbnormalBody(BaseModel):
+    emails: list[str] | None = None
+
+
 
 class Grok2ApiRemoteStatusBody(BaseModel):
     providers: list[str] | str | None = None
@@ -2654,6 +2658,21 @@ async def upload_cpa(body: CpaUploadBody):
             limit=max(1, min(5000, int(body.limit or 1000))),
             emails=_clean_emails(body.emails),
             require_probe=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post(_admin_path('api', 'cpa', 'delete-abnormal'))
+async def delete_cpa_abnormal(body: DeleteCpaAbnormalBody):
+    """删除选中账号在 CPA 上的异常 auth，并严格联动删本地（带备份）。
+
+    仅处理异常状态（reauth/quota_exhausted/permission_denied），健康账号跳过。
+    """
+    try:
+        return await asyncio.to_thread(
+            lite_store.delete_cpa_abnormal,
+            _clean_emails(body.emails),
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e)) from e
