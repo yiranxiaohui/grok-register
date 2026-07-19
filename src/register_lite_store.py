@@ -5820,6 +5820,119 @@ def discard_accounts(emails: list[str]) -> dict[str, Any]:
     return delete_accounts(emails, backup=False)
 
 
+ABNORMAL_CPA_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {"reauth", "quota_exhausted", "permission_denied"}
+)
+
+
+def _abnormal_emails_from_remote() -> list[str]:
+    """从 remote_accounts(provider='cpa') 取异常分类的去重 email。"""
+    init_db()
+    marks = tuple(sorted(ABNORMAL_CPA_CLASSIFICATIONS))
+    placeholders = ",".join("?" for _ in marks)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT lower(email) AS email
+            FROM remote_accounts
+            WHERE provider = 'cpa'
+              AND lower(classification) IN ({placeholders})
+              AND email IS NOT NULL AND email != ''
+            """,
+            marks,
+        ).fetchall()
+    return [str(r["email"]) for r in rows if r["email"]]
+
+
+def _cpa_file_name_for_email(conn, email: str) -> tuple[str, str]:
+    """返回 (classification, file_name)。file_name 优先取 raw_json.file_name，
+    缺失回退 _auth_part_filename(email, cpa=True)。classification 缺失返回 ''。"""
+    row = conn.execute(
+        """
+        SELECT classification, raw_json
+        FROM remote_accounts
+        WHERE provider = 'cpa' AND lower(email) = ?
+        ORDER BY seen_at DESC LIMIT 1
+        """,
+        (email.lower(),),
+    ).fetchone()
+    classification = str(row["classification"] or "").strip().lower() if row else ""
+    file_name = ""
+    if row and row["raw_json"]:
+        try:
+            raw = json.loads(row["raw_json"])
+            file_name = str(raw.get("file_name") or "").strip()
+        except Exception:  # noqa: BLE001
+            file_name = ""
+    if not file_name:
+        file_name = _auth_part_filename(email, cpa=True)
+    return classification, file_name
+
+
+def delete_cpa_abnormal(
+    emails: list[str], *, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """删 CPA 远端异常 auth + 严格联动删本地。
+
+    仅处理分类属于 ABNORMAL_CPA_CLASSIFICATIONS 的账号；healthy/未知跳过。
+    远端删成功（含 404 幂等）才删本地；失败则本地保留并报告。
+    """
+    clean: list[str] = []
+    seen: set[str] = set()
+    for email in emails or []:
+        key = str(email or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        clean.append(key)
+    if not clean:
+        return {"ok": False, "deleted": 0, "requested": 0,
+                "skipped": [], "failed": [], "backup_path": ""}
+
+    cfg = normalize_cpa_config(config or get_cpa_config(include_key=True))
+    if not cfg.get("base_url") or not cfg.get("management_key"):
+        return {"ok": False, "deleted": 0, "requested": len(clean),
+                "skipped": [], "failed": [], "backup_path": "",
+                "error": "CPA 连接未配置完整"}
+
+    init_db()
+    skipped: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    deletable: list[str] = []
+
+    with _connect() as conn:
+        resolved = {e: _cpa_file_name_for_email(conn, e) for e in clean}
+
+    for email in clean:
+        classification, file_name = resolved[email]
+        if classification not in ABNORMAL_CPA_CLASSIFICATIONS:
+            skipped.append({"email": email,
+                            "reason": classification or "无 CPA 异常记录"})
+            continue
+        r = _delete_cpa_auth_file_by_name(file_name, cfg)
+        if r.get("ok"):
+            deletable.append(email)
+        else:
+            failed.append({"email": email, "file_name": file_name,
+                           "status": r.get("status"), "error": r.get("error")})
+
+    backup_path = ""
+    deleted = 0
+    if deletable:
+        local = delete_accounts(deletable, backup=True)
+        deleted = int(local.get("deleted") or 0)
+        backup_path = str(local.get("backup_path") or "")
+
+    return {
+        "ok": True,
+        "deleted": deleted,
+        "requested": len(clean),
+        "skipped": skipped,
+        "failed": failed,
+        "backup_path": backup_path,
+    }
+
+
 def _save_probe_result(email: str, result: dict[str, Any]) -> None:
     # Do not clobber explicit local relogin success status with generic "active".
     status = "active" if result.get("ok") else "probe_failed"
