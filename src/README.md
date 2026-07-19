@@ -107,3 +107,4 @@ docker compose exec register-lite bash
 - 拉取远端全部 / 拉取远端异常
 - 导出 SSO / Auth ZIP / CPA
 - 上传 Grok2API / CPA
+- 删除 CPA 异常账号（远端 auth + 本地记录，手动按钮 / 调度自动，默认关）
