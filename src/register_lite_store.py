@@ -145,6 +145,8 @@ DEFAULT_CPA_CONFIG: dict[str, Any] = {
     "limit": 1000,
     "auto_upload_after_probe": False,
     "auto_upload_after_relogin": False,
+    "auto_delete_abnormal": False,
+    "auto_delete_min_interval_sec": 300,
 }
 
 DEFAULT_RELOGIN_CONFIG: dict[str, Any] = {
@@ -2129,6 +2131,11 @@ def normalize_cpa_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     except (TypeError, ValueError):
         limit = 1000
     limit = max(1, min(5000, limit))
+    try:
+        del_interval = int(src.get("auto_delete_min_interval_sec") or 300)
+    except (TypeError, ValueError):
+        del_interval = 300
+    del_interval = max(60, min(86400, del_interval))
     base_raw = str(src.get("base_url") or "").strip()
     # Accept management UI URLs like
     # https://cpa.example/management.html#/plugin-pages/grok-inspection/0
@@ -2150,6 +2157,8 @@ def normalize_cpa_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         "limit": limit,
         "auto_upload_after_probe": bool(src.get("auto_upload_after_probe")),
         "auto_upload_after_relogin": bool(src.get("auto_upload_after_relogin", False)),
+        "auto_delete_abnormal": bool(src.get("auto_delete_abnormal")),
+        "auto_delete_min_interval_sec": del_interval,
     }
 
 
