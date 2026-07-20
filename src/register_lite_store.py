@@ -4641,9 +4641,8 @@ def _sub2api_ensure_proxy(cfg: dict[str, Any], proxy_url: str, cache: dict[str, 
         return None
     key = f"{parsed['protocol']}://{parsed['username']}:{parsed['password']}@{parsed['host']}:{parsed['port']}"
     key_nopw = f"{parsed['protocol']}://{parsed['username']}@{parsed['host']}:{parsed['port']}"
+    cache.setdefault("map", {})
     if "loaded" not in cache:
-        cache["loaded"] = True
-        cache["map"] = {}
         try:
             data = _sub2api_request(cfg, "GET", "/api/v1/admin/proxies/all")
             items = data.get("items") if isinstance(data, dict) else (data or [])
@@ -4657,6 +4656,8 @@ def _sub2api_ensure_proxy(cfg: dict[str, Any], proxy_url: str, cache: dict[str, 
                 if it.get("id") is not None:
                     cache["map"][k] = int(it["id"])
                     cache["map"].setdefault(k_nopw, int(it["id"]))
+            # 仅在 list 成功后标记已加载；瞬时失败保持未加载，下个账号会重试拉取
+            cache["loaded"] = True
         except Exception as exc:  # noqa: BLE001
             print(f"[register-lite] sub2api list proxies failed: {str(exc)[:200]}")
     if key in cache["map"]:

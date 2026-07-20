@@ -2620,6 +2620,7 @@ async def put_remote_backend(body: RemoteBackendBody):
         ),
         "grok2api": lite_store.get_grok2api_config(include_password=False),
         "cpa": lite_store.get_cpa_config(include_key=False),
+        "sub2api": lite_store.get_sub2api_config(include_key=False),
     }
 
 

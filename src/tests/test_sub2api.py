@@ -210,6 +210,35 @@ def test_ensure_proxy_dedupe_ignores_absent_password_in_list():
         store._urlopen = orig
 
 
+def test_ensure_proxy_retries_list_after_transient_failure():
+    # list GET 瞬时失败不应永久禁用查重：cache 未标记 loaded，后续不同代理的账号会重试拉取列表。
+    calls = {"get": 0, "post": 0}
+    def fake(req, *, timeout):
+        if req.get_method() == "GET":
+            calls["get"] += 1
+            if calls["get"] == 1:
+                raise RuntimeError("sub2api 请求失败 HTTP 500: transient")
+            return _FakeResp(200, {"code": 0, "data": {"items": [
+                {"id": 9, "protocol": "socks5", "host": "2.2.2.2", "port": 1080, "username": ""}
+            ]}})
+        calls["post"] += 1
+        return _FakeResp(200, {"code": 0, "data": {"id": 100}})
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        cache = {}
+        # 账号 A：首次 GET 失败 → 未标记 loaded → 降级创建，返回占位 id 100。
+        pid_a = store._sub2api_ensure_proxy(_S2A_CFG, "http://10.0.0.9:3128", cache)
+        # 账号 B（不同代理）：因未标记 loaded 而重试 GET，这次成功并在列表中命中 → 返回 9（非再创建）。
+        pid_b = store._sub2api_ensure_proxy(_S2A_CFG, "socks5://2.2.2.2:1080", cache)
+        assert pid_a == 100, pid_a
+        assert calls["get"] == 2, calls   # 第二个账号确实重试了 GET（未被首次失败永久禁用）
+        assert pid_b == 9, pid_b          # 命中重试后的列表查重，而非再次创建
+        assert calls["post"] == 1, calls  # 只有账号 A 创建过一次
+    finally:
+        store._urlopen = orig
+
+
 # ---------- Task 4: 上传主流程 ----------
 
 def _seed_account(email, sso, proxy_url="", status="active", probe_ok=True):
