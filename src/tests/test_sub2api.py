@@ -208,3 +208,115 @@ def test_ensure_proxy_dedupe_ignores_absent_password_in_list():
         assert pid == 3, pid
     finally:
         store._urlopen = orig
+
+
+# ---------- Task 4: 上传主流程 ----------
+
+def _seed_account(email, sso, proxy_url="", status="active", probe_ok=True):
+    store.init_db()
+    now = 1_700_000_000.0
+    probe = json.dumps({"ok": bool(probe_ok)})
+    with store._connect() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO accounts
+               (email, auth_key, sso, status, last_probe_json, proxy_url, created_at, updated_at, raw_json)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (email, "k_" + email, sso, status, probe, proxy_url, now, now, "{}"),
+        )
+
+
+def test_list_sub2api_sso_rows_dedup():
+    _reset_settings()
+    with store._connect() as conn:
+        conn.execute("DELETE FROM accounts")
+    _seed_account("a@ex.com", "SSO_A", "socks5://1.1.1.1:1080")
+    _seed_account("b@ex.com", "SSO_A")   # 同 sso → 去重后只留一条
+    _seed_account("c@ex.com", "SSO_C")
+    rows = store.list_sub2api_sso_rows(emails=["a@ex.com", "b@ex.com", "c@ex.com"])
+    ssos = sorted(r["sso"] for r in rows)
+    assert ssos == ["SSO_A", "SSO_C"], ssos
+
+
+def test_upload_sub2api_maps_index_to_email():
+    _reset_settings()
+    with store._connect() as conn:
+        conn.execute("DELETE FROM accounts")
+    _seed_account("a@ex.com", "SSO_A")
+    _seed_account("c@ex.com", "SSO_C")
+    store._set_json_setting("sub2api_config", store.normalize_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k", "sync_proxies": False,
+    }))
+    posts = []
+    def fake(req, *, timeout):
+        if req.get_method() == "POST" and "sso-to-oauth" in req.full_url:
+            body = json.loads(req.data.decode())
+            posts.append(body)
+            # created index 从 1；失败 index 2
+            return _FakeResp(200, {"code": 0, "data": {
+                "created": [{"index": 1, "email": "a@ex.com"}],
+                "failed": [{"index": 2, "error": "convert failed"}],
+            }})
+        raise AssertionError("unexpected " + req.full_url)
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        res = store.upload_sub2api_sso(limit=10, emails=["a@ex.com", "c@ex.com"], require_probe=False)
+    finally:
+        store._urlopen = orig
+    assert res["uploaded"] == 1, res
+    assert res["failed"] == 1, res
+    # 无代理同步 → 不带 proxy_id
+    assert "proxy_id" not in posts[0], posts[0]
+    # 成功 email 标记已导入
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM remote_accounts WHERE provider='sub2api' AND lower(email)='a@ex.com'"
+        ).fetchone()
+    assert row is not None
+
+
+def test_upload_sub2api_groups_by_proxy():
+    _reset_settings()
+    with store._connect() as conn:
+        conn.execute("DELETE FROM accounts")
+    _seed_account("p1@ex.com", "SSO_P1", "socks5://1.1.1.1:1080")
+    _seed_account("p2@ex.com", "SSO_P2", "socks5://1.1.1.1:1080")
+    _seed_account("np@ex.com", "SSO_NP", "")
+    store._set_json_setting("sub2api_config", store.normalize_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k", "sync_proxies": True,
+    }))
+    posts = []
+    def fake(req, *, timeout):
+        m, url = req.get_method(), req.full_url
+        if m == "GET" and "proxies/all" in url:
+            return _FakeResp(200, {"code": 0, "data": {"items": []}})
+        if m == "POST" and url.endswith("/api/v1/admin/proxies"):
+            return _FakeResp(200, {"code": 0, "data": {"id": 5}})
+        if m == "POST" and "sso-to-oauth" in url:
+            body = json.loads(req.data.decode())
+            posts.append(body)
+            created = [{"index": i + 1, "email": "x"} for i in range(len(body["sso_tokens"]))]
+            return _FakeResp(200, {"code": 0, "data": {"created": created, "failed": []}})
+        raise AssertionError("unexpected " + url)
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        res = store.upload_sub2api_sso(limit=10, require_probe=False,
+                                       emails=["p1@ex.com", "p2@ex.com", "np@ex.com"])
+    finally:
+        store._urlopen = orig
+    # 两组请求：带 proxy_id=5 的一组（2 token）+ 无 proxy 的一组（1 token）
+    with_pid = [p for p in posts if p.get("proxy_id") == 5]
+    without_pid = [p for p in posts if "proxy_id" not in p]
+    assert len(with_pid) == 1 and len(with_pid[0]["sso_tokens"]) == 2, posts
+    assert len(without_pid) == 1 and len(without_pid[0]["sso_tokens"]) == 1, posts
+    assert res["uploaded"] == 3, res
+
+
+def test_test_sub2api_remote_returns_total():
+    store._urlopen = lambda req, *, timeout: _FakeResp(200, {"code": 0, "data": {"total": 12, "items": []}})
+    try:
+        res = store.test_sub2api_remote({"base_url": "https://s2a.example", "api_key": "k"})
+    finally:
+        pass
+    assert res["ok"] is True and res["grok_total"] == 12, res

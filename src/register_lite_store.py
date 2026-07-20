@@ -4647,6 +4647,148 @@ def _sub2api_ensure_proxy(cfg: dict[str, Any], proxy_url: str, cache: dict[str, 
     return pid
 
 
+SUB2API_SSO_CHUNK = 10  # 每请求 token 数：服务端 3 并发做上游 SSO 转换，块小保响应快
+
+
+def list_sub2api_sso_rows(limit: int = 1000, *, emails: list[str] | None = None) -> list[dict[str, Any]]:
+    init_db()
+    limit = max(1, min(5000, int(limit or 1000)))
+    clean = sorted({str(e or "").strip().lower() for e in (emails or []) if str(e or "").strip()})
+    where = ["sso IS NOT NULL", "sso != ''"]
+    args: list[Any] = []
+    if clean:
+        where.append("lower(email) IN (" + ",".join("?" for _ in clean) + ")")
+        args.extend(clean)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT email, sso, proxy_url FROM accounts WHERE "
+            + " AND ".join(where)
+            + " ORDER BY updated_at DESC LIMIT ?",
+            [*args, limit],
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    seen_sso: set[str] = set()
+    for row in rows:
+        sso = str(row["sso"] or "").strip()
+        if not sso or sso in seen_sso:
+            continue
+        seen_sso.add(sso)
+        out.append({
+            "email": str(row["email"] or ""),
+            "sso": sso,
+            "proxy_url": str(row["proxy_url"] or "").strip(),
+        })
+    return out
+
+
+def upload_sub2api_sso(
+    config: dict[str, Any] | None = None,
+    *,
+    limit: int = 1000,
+    emails: list[str] | None = None,
+    require_probe: bool = True,
+) -> dict[str, Any]:
+    cfg = normalize_sub2api_config(config or get_sub2api_config(include_key=True))
+    if not cfg["base_url"]:
+        raise ValueError("sub2api 地址不能为空")
+    if not cfg["api_key"]:
+        raise ValueError("sub2api 管理员 API Key 不能为空")
+    approved, skipped = _verified_remote_import_emails(emails, limit=limit, require_probe=require_probe)
+    approved_set = set(approved)
+    rows = [r for r in list_sub2api_sso_rows(limit=limit, emails=approved) if r["email"].lower() in approved_set]
+    # approved 里但无 sso 的账号：补进 skipped
+    have_sso = {r["email"].lower() for r in rows}
+    for email in approved:
+        if email not in have_sso:
+            skipped.append({"email": email, "reason": "本地无 SSO"})
+    if not rows:
+        return {
+            "ok": False,
+            "error": "没有可导入的 SSO" if not require_probe else "没有通过测活的 SSO 可导入",
+            "total": 0, "uploaded": 0, "failed": 0,
+            "skipped": len(skipped), "skipped_accounts": skipped[:100],
+            "emails": [],
+        }
+
+    # 按 proxy_id 分组（sync_proxies 关闭或解析失败 → None 组）。
+    proxy_cache: dict[str, Any] = {}
+    groups: dict[Any, list[dict[str, Any]]] = {}
+    for r in rows:
+        pid = None
+        if cfg["sync_proxies"] and r["proxy_url"]:
+            pid = _sub2api_ensure_proxy(cfg, r["proxy_url"], proxy_cache)
+        groups.setdefault(pid, []).append(r)
+
+    uploaded = 0
+    failed = 0
+    ok_emails: list[str] = []
+    fail_details: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    for pid, grp in groups.items():
+        for i in range(0, len(grp), SUB2API_SSO_CHUNK):
+            chunk = grp[i:i + SUB2API_SSO_CHUNK]
+            body: dict[str, Any] = {"sso_tokens": [r["sso"] for r in chunk]}
+            if pid is not None:
+                body["proxy_id"] = pid
+            try:
+                data = _sub2api_request(cfg, "POST", "/api/v1/admin/grok/sso-to-oauth", body, timeout=120.0)
+                created = (data.get("created") if isinstance(data, dict) else None) or []
+                failed_items = (data.get("failed") if isinstance(data, dict) else None) or []
+                for c in created:
+                    idx = int(c.get("index") or 0)
+                    if 1 <= idx <= len(chunk):
+                        ok_emails.append(chunk[idx - 1]["email"])
+                    uploaded += 1
+                for f in failed_items:
+                    idx = int(f.get("index") or 0)
+                    em = chunk[idx - 1]["email"] if 1 <= idx <= len(chunk) else ""
+                    fail_details.append({"email": em, "error": str(f.get("error") or "")[:200]})
+                    failed += 1
+                results.append({"proxy_id": pid, "tokens": len(chunk),
+                                "created": len(created), "failed": len(failed_items),
+                                "proxy_fallback": pid is None and bool(chunk[0]["proxy_url"]) if chunk else False})
+            except Exception as exc:  # noqa: BLE001
+                for r in chunk:
+                    fail_details.append({"email": r["email"], "error": str(exc)[:200]})
+                    failed += 1
+                results.append({"proxy_id": pid, "tokens": len(chunk), "error": str(exc)[:200]})
+
+    if ok_emails:
+        try:
+            mark_local_remote_imported(ok_emails, provider="sub2api", reason="manual_upload_sub2api" if not require_probe else "auto_upload_sub2api")
+        except Exception:
+            pass
+    _set_json_setting("sub2api_last_upload", {
+        "at": time.time(), "total": len(rows), "uploaded": uploaded, "failed": failed,
+        "base_url": cfg["base_url"],
+    })
+    return {
+        "ok": failed == 0 and uploaded > 0,
+        "base_url": cfg["base_url"],
+        "total": len(rows),
+        "uploaded": uploaded,
+        "failed": failed,
+        "fail_details": fail_details[:100],
+        "skipped": len(skipped),
+        "skipped_accounts": skipped[:100],
+        "results": results[:50],
+        "emails": ok_emails,
+    }
+
+
+def test_sub2api_remote(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    cfg = normalize_sub2api_config(config or get_sub2api_config(include_key=True))
+    if not cfg["base_url"]:
+        raise ValueError("sub2api 地址不能为空")
+    if not cfg["api_key"]:
+        raise ValueError("sub2api 管理员 API Key 不能为空")
+    data = _sub2api_request(cfg, "GET", "/api/v1/admin/accounts?platform=grok&page_size=1", timeout=30.0)
+    total = 0
+    if isinstance(data, dict):
+        total = int(data.get("total") or 0)
+    return {"ok": True, "base_url": cfg["base_url"], "grok_total": total}
+
+
 def upload_cpa_auth_files(
     config: dict[str, Any] | None = None,
     *,
