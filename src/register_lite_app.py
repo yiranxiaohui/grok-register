@@ -478,6 +478,20 @@ class CpaUploadBody(BaseModel):
     emails: list[str] | None = None
 
 
+class Sub2ApiConfigBody(BaseModel):
+    base_url: str | None = None
+    api_key: str | None = None
+    limit: int | None = None
+    sync_proxies: bool | None = None
+    auto_upload_after_probe: bool | None = None
+    auto_upload_after_relogin: bool | None = None
+
+
+class Sub2ApiUploadBody(BaseModel):
+    limit: int = 1000
+    emails: list[str] | None = None
+
+
 class DeleteCpaAbnormalBody(BaseModel):
     emails: list[str] | None = None
 
@@ -2680,6 +2694,56 @@ async def delete_cpa_abnormal(body: DeleteCpaAbnormalBody):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+
+@app.get(_admin_path('api', 'sub2api', 'config'))
+async def get_sub2api_config():
+    return {"ok": True, "config": lite_store.get_sub2api_config(include_key=True), "source": "sqlite"}
+
+
+@app.put(_admin_path('api', 'sub2api', 'config'))
+async def put_sub2api_config(body: Sub2ApiConfigBody):
+    try:
+        cfg = lite_store.set_sub2api_config(body.model_dump(exclude_none=False), replace=False)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    backend = lite_store.get_remote_backend(resolve=True)
+    return {
+        "ok": True,
+        "config": cfg,
+        "backend": backend,
+        "message": "sub2api 配置已保存"
+        + ("（已锁定远端对接=sub2api，Grok2API/CPA 自动导入已关闭）" if backend == "sub2api" else ""),
+    }
+
+
+@app.post(_admin_path('api', 'sub2api', 'test'))
+async def test_sub2api(body: Sub2ApiConfigBody):
+    raw = body.model_dump(exclude_none=False)
+    key = str(raw.get("api_key") or "")
+    if (not key.strip()) or set(key.strip()) == {"*"} or key.strip() == "********":
+        stored = lite_store.get_sub2api_config(include_key=True)
+        raw["api_key"] = stored.get("api_key") or ""
+    cfg = lite_store.normalize_sub2api_config(raw)
+    try:
+        return await asyncio.to_thread(lite_store.test_sub2api_remote, cfg)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post(_admin_path('api', 'sub2api', 'upload'))
+async def upload_sub2api(body: Sub2ApiUploadBody):
+    limit = max(1, min(5000, int(body.limit or 1000)))
+    emails = _clean_emails(body.emails)
+    try:
+        return await asyncio.to_thread(
+            lite_store.upload_sub2api_sso,
+            None,
+            limit=limit,
+            emails=emails,
+            require_probe=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.get(_admin_path('api', 'accounts', 'register-email', 'config'))

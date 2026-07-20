@@ -389,3 +389,20 @@ def test_sync_accounts_after_probe_reaches_sub2api():
             "SELECT 1 FROM remote_accounts WHERE provider='sub2api' AND lower(email)='prod@ex.com'"
         ).fetchone()
     assert row is not None, "sub2api not reached through production sync_accounts_after_probe"
+
+
+# ---------- Task 6: API body ----------
+
+def test_sub2api_config_body_roundtrip():
+    _reset_settings()
+    from register_lite_app import Sub2ApiConfigBody
+    body = Sub2ApiConfigBody(
+        base_url="https://s2a.example", api_key="k", limit=1000,
+        sync_proxies=True, auto_upload_after_probe=True, auto_upload_after_relogin=False,
+    )
+    dumped = body.model_dump(exclude_none=False)
+    cfg = store.set_sub2api_config(dumped, replace=True)
+    assert cfg["auto_upload_after_probe"] is True, cfg
+    assert cfg["sync_proxies"] is True, cfg
+    loaded = store.get_sub2api_config(include_key=True)
+    assert loaded["base_url"] == "https://s2a.example", loaded
