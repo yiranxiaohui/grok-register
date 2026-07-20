@@ -121,7 +121,7 @@ DEFAULT_REGISTRATION_CONFIG: dict[str, Any] = {
 
 # Single remote backend: Grok2API and CPA are mutually exclusive.
 # Auto-import + remote-status pull both follow this switch.
-REMOTE_BACKENDS = ("grok2api", "cpa")
+REMOTE_BACKENDS = ("grok2api", "cpa", "sub2api")
 DEFAULT_REMOTE_BACKEND = str(os.getenv("GROK_REGISTER_REMOTE_BACKEND", "") or "").strip().lower()
 
 DEFAULT_GROK2API_CONFIG: dict[str, Any] = {
@@ -147,6 +147,15 @@ DEFAULT_CPA_CONFIG: dict[str, Any] = {
     "auto_upload_after_relogin": False,
     "auto_delete_abnormal": False,
     "auto_delete_min_interval_sec": 300,
+}
+
+DEFAULT_SUB2API_CONFIG: dict[str, Any] = {
+    "base_url": os.getenv("GROK_REGISTER_LITE_SUB2API_BASE_URL", ""),
+    "api_key": os.getenv("GROK_REGISTER_LITE_SUB2API_API_KEY", ""),
+    "limit": 1000,
+    "sync_proxies": True,
+    "auto_upload_after_probe": False,
+    "auto_upload_after_relogin": False,
 }
 
 DEFAULT_RELOGIN_CONFIG: dict[str, Any] = {
@@ -1961,6 +1970,8 @@ def normalize_remote_backend(raw: Any = None) -> str:
         text = "grok2api"
     if text in {"cliproxy", "cliproxyapi", "cli_proxy", "cli_proxy_api", "cpamc"}:
         text = "cpa"
+    if text in {"s2a", "sub2", "sub_2api", "sub2_api", "subtoapi", "sub_to_api"}:
+        text = "sub2api"
     if text in REMOTE_BACKENDS:
         return text
     return ""
@@ -2199,6 +2210,73 @@ def set_cpa_config(patch: dict[str, Any] | None, *, replace: bool = False) -> di
         gcfg = normalize_grok2api_config(_json_setting("grok2api_config") or {})
         if not (gcfg.get("base_url") and gcfg.get("username") and gcfg.get("password")):
             _set_json_setting("remote_backend", "cpa")
+    return cfg
+
+
+def normalize_sub2api_config(raw: dict[str, Any] | None) -> dict[str, Any]:
+    src = {**DEFAULT_SUB2API_CONFIG, **(raw or {})}
+    try:
+        limit = int(src.get("limit") or 1000)
+    except (TypeError, ValueError):
+        limit = 1000
+    limit = max(1, min(5000, limit))
+    base_raw = str(src.get("base_url") or "").strip()
+    try:
+        base_url = _normalize_origin(base_raw) if base_raw else ""
+    except ValueError:
+        parsed = urllib.parse.urlsplit(base_raw)
+        if parsed.scheme and parsed.netloc:
+            base_url = _normalize_origin(
+                urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+            )
+        else:
+            raise
+    return {
+        "base_url": base_url,
+        "api_key": str(src.get("api_key") or ""),
+        "limit": limit,
+        "sync_proxies": bool(src.get("sync_proxies", True)),
+        "auto_upload_after_probe": bool(src.get("auto_upload_after_probe")),
+        "auto_upload_after_relogin": bool(src.get("auto_upload_after_relogin", False)),
+    }
+
+
+def get_sub2api_config(*, include_key: bool = True) -> dict[str, Any]:
+    cfg = _mask_auto_by_remote_pin(normalize_sub2api_config(_json_setting("sub2api_config") or {}), "sub2api")
+    if include_key:
+        return cfg
+    public = dict(cfg)
+    public["api_key_set"] = bool(public.get("api_key"))
+    public["api_key"] = "********" if public.get("api_key") else ""
+    return public
+
+
+def set_sub2api_config(patch: dict[str, Any] | None, *, replace: bool = False) -> dict[str, Any]:
+    base = {} if replace else (_json_setting("sub2api_config") or {})
+    patch = dict(patch or {})
+    key = str(patch.get("api_key") or "")
+    if (not key.strip()) or set(key.strip()) == {"*"} or key.strip() == "********":
+        if "api_key" in patch:
+            if str(base.get("api_key") or "").strip():
+                patch["api_key"] = base.get("api_key")
+            else:
+                patch.pop("api_key", None)
+    merged = {**base, **patch}
+    cfg = normalize_sub2api_config(merged)
+    if not cfg["base_url"]:
+        raise ValueError("sub2api 地址不能为空")
+    if not str(cfg.get("api_key") or "").strip():
+        raise ValueError("sub2api 管理员 API Key 不能为空（保存后刷新若显示 ****，请重新输入真实 Key 再保存）")
+    _set_json_setting("sub2api_config", cfg)
+    if cfg.get("auto_upload_after_probe") or cfg.get("auto_upload_after_relogin"):
+        _disable_other_backend_auto("sub2api")
+    elif get_remote_backend(resolve=False) == "" and cfg.get("base_url"):
+        gcfg = normalize_grok2api_config(_json_setting("grok2api_config") or {})
+        ccfg = normalize_cpa_config(_json_setting("cpa_config") or {})
+        g_ready = bool(gcfg.get("base_url") and gcfg.get("username") and gcfg.get("password"))
+        c_ready = bool(ccfg.get("base_url") and ccfg.get("management_key"))
+        if not g_ready and not c_ready:
+            _set_json_setting("remote_backend", "sub2api")
     return cfg
 
 
