@@ -108,3 +108,4 @@ docker compose exec register-lite bash
 - 导出 SSO / Auth ZIP / CPA
 - 上传 Grok2API / CPA
 - 删除 CPA 异常账号（远端 auth + 本地记录，手动按钮 / 调度自动，默认关）
+- 远端对接支持第三方 **sub2api**：通过其原生 `sso-to-oauth` 接口导入账号（仅上传本地 SSO，转换/探活由 sub2api 完成），与 Grok2API / CPA 三选一互斥；支持账号级代理同步、测活/重登后自动上传、手动批量导入

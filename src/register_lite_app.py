@@ -2600,7 +2600,7 @@ async def get_remote_backend():
         "stored": stored,
         "options": list(lite_store.REMOTE_BACKENDS),
         "exclusive": True,
-        "note": "Grok2API 与 CPA 互斥：选一个自动导入/拉取，另一个不会跑",
+        "note": "Grok2API / CPA / sub2api 三选一互斥：选一个自动导入/拉取，另两个不会跑",
     }
 
 
