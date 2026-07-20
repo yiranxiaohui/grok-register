@@ -350,3 +350,42 @@ def test_auto_upload_routes_to_sub2api_when_pinned():
     # grok2api / cpa 被 skip
     assert any("grok2api" in s for s in out["skipped"]), out
     assert any("cpa" in s for s in out["skipped"]), out
+
+
+def test_sync_accounts_after_probe_reaches_sub2api():
+    """回归测试（Fix pass）：_chunked_sync_accounts 的门禁此前只检查
+    grok2api/cpa 的 auto_upload_after_probe，sub2api 永远走不到
+    _upload_emails_to_remotes。这里走生产入口 sync_accounts_after_probe，
+    而不是直接调用 _upload_emails_to_remotes，证明门禁修复后 sub2api
+    真的被触达。"""
+    _reset_settings()
+    with store._connect() as conn:
+        conn.execute("DELETE FROM accounts")
+        conn.execute("DELETE FROM remote_accounts")
+    _seed_account("prod@ex.com", "SSO_PROD", status="active", probe_ok=True)
+    store._set_json_setting("sub2api_config", store.normalize_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k", "sync_proxies": False,
+        "auto_upload_after_probe": True,
+    }))
+    store.set_remote_backend("sub2api")
+    def fake(req, *, timeout):
+        if "sso-to-oauth" in req.full_url:
+            return _FakeResp(200, {"code": 0, "data": {"created": [{"index": 1, "email": "prod@ex.com"}], "failed": []}})
+        raise AssertionError("unexpected " + req.full_url)
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        res = store.sync_accounts_after_probe(["prod@ex.com"], batch_size=1)
+    finally:
+        store._urlopen = orig
+    # Production path must actually invoke sub2api now (previously it short-circuited
+    # at the _chunked_sync_accounts gate before ever calling _upload_emails_to_remotes).
+    assert res.get("uploaded", 0) >= 1, res
+    assert res.get("batches") and res["batches"][0].get("ok"), res
+    # The remote_accounts row is only written by mark_local_remote_imported on a
+    # real successful sub2api upload — the strongest proof sub2api was reached.
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM remote_accounts WHERE provider='sub2api' AND lower(email)='prod@ex.com'"
+        ).fetchone()
+    assert row is not None, "sub2api not reached through production sync_accounts_after_probe"

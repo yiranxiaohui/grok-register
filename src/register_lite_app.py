@@ -1215,7 +1215,8 @@ def _relogin_selected_accounts(
     sync_result: dict[str, Any] | None = None
     gcfg = lite_store.get_grok2api_config(include_password=False)
     ccfg = lite_store.get_cpa_config(include_key=False)
-    want_sync = bool(gcfg.get("auto_upload_after_relogin") or ccfg.get("auto_upload_after_relogin"))
+    scfg = lite_store.get_sub2api_config(include_key=False)
+    want_sync = bool(gcfg.get("auto_upload_after_relogin") or ccfg.get("auto_upload_after_relogin") or scfg.get("auto_upload_after_relogin"))
     if stopped:
         sync_result = {
             "ok": True,

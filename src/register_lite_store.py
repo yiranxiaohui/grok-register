@@ -2558,13 +2558,17 @@ def _chunked_sync_accounts(
 
     flag_key = "auto_upload_after_relogin" if mode == "relogin" else "auto_upload_after_probe"
     ccfg = get_cpa_config(include_key=True)
+    scfg = get_sub2api_config(include_key=True)
     g_on = bool(gcfg.get(flag_key)) and bool(
         gcfg.get("base_url") and gcfg.get("username") and gcfg.get("password")
     )
     c_on = bool(ccfg.get(flag_key)) and bool(
         ccfg.get("base_url") and ccfg.get("management_key")
     )
-    if not g_on and not c_on:
+    s_on = bool(scfg.get(flag_key)) and bool(
+        scfg.get("base_url") and scfg.get("api_key")
+    )
+    if not g_on and not c_on and not s_on:
         out["skipped"].append(f"no remote enabled for {mode} sync")
         return out
 
