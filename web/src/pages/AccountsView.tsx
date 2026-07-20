@@ -435,6 +435,32 @@ export function AccountsView() {
     await refresh();
   };
 
+  const uploadSelectedSub2api = async () => {
+    const emails = selectedEmails();
+    if (!emails.length) {
+      toast("先选择账号");
+      return;
+    }
+    setStatusBadge({ text: "sub2api 导入中：0 / " + emails.length, kind: "warn" });
+    op.show("sub2api 导入日志", "准备导入 " + emails.length + " 个选中账号...\n只上传本地 SSO，转换与探活由 sub2api 完成。");
+    const data = await api<any>(adminUrl("api", "sub2api", "upload"), {
+      method: "POST",
+      body: JSON.stringify({ limit: emails.length, emails }),
+    });
+    setLogData(data);
+    const uploaded = data.uploaded || 0;
+    const failed = data.failed || 0;
+    const skipped = data.skipped || 0;
+    let detail = "";
+    if (Array.isArray(data.fail_details) && data.fail_details.length) {
+      detail = "\n失败明细：\n" + data.fail_details.slice(0, 20).map((f: any) => `  ${f.email || "?"}: ${toChineseText(f.error || "")}`).join("\n");
+    }
+    op.update("sub2api 导入完成\n成功：" + uploaded + "\n失败：" + failed + "\n跳过：" + skipped + (data.error ? "\n错误：" + toChineseText(data.error) : "") + detail);
+    setStatusBadge({ text: "sub2api：成功 " + uploaded + "，失败 " + failed, kind: data.ok ? "ok" : "warn" });
+    toast("sub2api 已处理：" + uploaded);
+    await refresh();
+  };
+
   const deleteSelected = async () => {
     const emails = selectedEmails();
     if (!emails.length) {
@@ -682,6 +708,7 @@ export function AccountsView() {
             <button className="btn" type="button" onClick={() => run(probeSelected)}>探测选中</button>
             <button className="btn" type="button" onClick={() => run(uploadSelectedGrok2api)}>Grok2API 导入</button>
             <button className="btn" type="button" onClick={() => run(uploadSelectedCpa)}>CPA 导入</button>
+            <button className="btn" type="button" onClick={() => run(uploadSelectedSub2api)}>sub2api 导入</button>
             <button className="btn primary" type="button" onClick={() => run(reloginSelected)}>重登</button>
             <button className="btn danger" type="button" onClick={() => run(deleteSelected)}>删除选中</button>
             <button className="btn danger" type="button" onClick={() => run(deleteCpaAbnormalSelected)}>删除 CPA 异常</button>
