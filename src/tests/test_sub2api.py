@@ -45,3 +45,56 @@ def test_sub2api_config_mask_and_preserve_key():
     # 保存掩码值应保留旧 key
     store.set_sub2api_config({"base_url": "https://s2a.example", "api_key": "********"})
     assert store.get_sub2api_config(include_key=True)["api_key"] == "secret"
+
+
+# ---------- Task 2: 三方互斥 ----------
+
+def _reset_settings():
+    with store._connect() as conn:
+        conn.execute("DELETE FROM settings WHERE key IN ('remote_backend','grok2api_config','cpa_config','sub2api_config')")
+
+
+def test_set_sub2api_backend_disables_others_auto():
+    _reset_settings()
+    store._set_json_setting("grok2api_config", store.normalize_grok2api_config({
+        "base_url": "http://127.0.0.1:36214", "username": "u", "password": "p",
+        "auto_upload_after_probe": True,
+    }))
+    store._set_json_setting("cpa_config", store.normalize_cpa_config({
+        "base_url": "https://cpa.example", "management_key": "mk",
+        "auto_upload_after_relogin": True,
+    }))
+    store.set_remote_backend("sub2api")
+    g = store.normalize_grok2api_config(store._json_setting("grok2api_config"))
+    c = store.normalize_cpa_config(store._json_setting("cpa_config"))
+    assert g["auto_upload_after_probe"] is False, g
+    assert c["auto_upload_after_relogin"] is False, c
+
+
+def test_get_backend_sub2api_when_only_ready():
+    _reset_settings()
+    store._set_json_setting("sub2api_config", store.normalize_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k",
+    }))
+    assert store.get_remote_backend(resolve=True) == "sub2api"
+
+
+def test_get_backend_priority_grok_over_sub2api():
+    _reset_settings()
+    store._set_json_setting("grok2api_config", store.normalize_grok2api_config({
+        "base_url": "http://127.0.0.1:36214", "username": "u", "password": "p",
+    }))
+    store._set_json_setting("sub2api_config", store.normalize_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k",
+    }))
+    # 均 ready 无 pin，无 auto → grok2api 优先
+    assert store.get_remote_backend(resolve=True) == "grok2api"
+
+
+def test_set_sub2api_config_auto_pins_backend():
+    _reset_settings()
+    store.set_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k",
+        "auto_upload_after_probe": True,
+    }, replace=True)
+    assert store.get_remote_backend(resolve=False) == "sub2api"

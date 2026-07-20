@@ -1978,12 +1978,7 @@ def normalize_remote_backend(raw: Any = None) -> str:
 
 
 def get_remote_backend(*, resolve: bool = True) -> str:
-    """Return the exclusive remote backend: ``grok2api`` | ``cpa`` | ``""``.
-
-    When ``resolve`` is True and no explicit switch is stored, infer from which
-    side has auto-import enabled **and** is fully configured. CPA wins only when
-    it is the sole ready/auto side (matches the exclusive remote-backend workflow).
-    """
+    """Return the exclusive remote backend: grok2api | cpa | sub2api | ""."""
     stored = normalize_remote_backend(_json_setting("remote_backend"))
     if stored:
         return stored
@@ -2000,69 +1995,71 @@ def get_remote_backend(*, resolve: bool = True) -> str:
         ccfg = normalize_cpa_config(_json_setting("cpa_config") or {})
     except Exception:
         ccfg = dict(DEFAULT_CPA_CONFIG)
-    g_auto = bool(gcfg.get("auto_upload_after_probe") or gcfg.get("auto_upload_after_relogin"))
-    c_auto = bool(ccfg.get("auto_upload_after_probe") or ccfg.get("auto_upload_after_relogin"))
-    g_ready = bool(gcfg.get("base_url") and gcfg.get("username") and gcfg.get("password"))
-    c_ready = bool(ccfg.get("base_url") and ccfg.get("management_key"))
-    g_active = g_auto and g_ready
-    c_active = c_auto and c_ready
-    if c_active and not g_active:
-        return "cpa"
-    if g_active and not c_active:
-        return "grok2api"
-    # Neither auto-active: fall back to whichever connection is ready.
-    if c_ready and not g_ready:
-        return "cpa"
-    if g_ready and not c_ready:
-        return "grok2api"
-    # Both auto-active or both ready without a pin — prefer Grok2API for parity
-    # with previous default (auto_upload_after_relogin=True). Operator should pin.
-    if g_active or g_ready:
-        return "grok2api"
-    if c_active or c_ready:
-        return "cpa"
+    try:
+        scfg = normalize_sub2api_config(_json_setting("sub2api_config") or {})
+    except Exception:
+        scfg = dict(DEFAULT_SUB2API_CONFIG)
+    ready = {
+        "grok2api": bool(gcfg.get("base_url") and gcfg.get("username") and gcfg.get("password")),
+        "cpa": bool(ccfg.get("base_url") and ccfg.get("management_key")),
+        "sub2api": bool(scfg.get("base_url") and scfg.get("api_key")),
+    }
+    auto = {
+        "grok2api": bool(gcfg.get("auto_upload_after_probe") or gcfg.get("auto_upload_after_relogin")),
+        "cpa": bool(ccfg.get("auto_upload_after_probe") or ccfg.get("auto_upload_after_relogin")),
+        "sub2api": bool(scfg.get("auto_upload_after_probe") or scfg.get("auto_upload_after_relogin")),
+    }
+    order = ("grok2api", "cpa", "sub2api")
+    active = [b for b in order if auto[b] and ready[b]]
+    if len(active) == 1:
+        return active[0]
+    ready_list = [b for b in order if ready[b]]
+    if len(ready_list) == 1:
+        return ready_list[0]
+    # 多者并存或全空：按优先级选第一个 active，否则第一个 ready。
+    for b in order:
+        if auto[b] and ready[b]:
+            return b
+    for b in order:
+        if ready[b]:
+            return b
     return ""
 
 
 def set_remote_backend(backend: str | None) -> str:
     value = normalize_remote_backend(backend)
     if value and value not in REMOTE_BACKENDS:
-        raise ValueError("远端对接只能是 grok2api 或 cpa")
+        raise ValueError("远端对接只能是 grok2api / cpa / sub2api")
     _set_json_setting("remote_backend", value)
-    # Enforce mutual exclusion on auto-import flags.
-    if value == "grok2api":
-        cbase = dict(_json_setting("cpa_config") or {})
-        if cbase.get("auto_upload_after_probe") or cbase.get("auto_upload_after_relogin"):
-            cbase["auto_upload_after_probe"] = False
-            cbase["auto_upload_after_relogin"] = False
-            _set_json_setting("cpa_config", normalize_cpa_config(cbase))
-    elif value == "cpa":
-        gbase = dict(_json_setting("grok2api_config") or {})
-        if gbase.get("auto_upload_after_probe") or gbase.get("auto_upload_after_relogin"):
-            gbase["auto_upload_after_probe"] = False
-            gbase["auto_upload_after_relogin"] = False
-            _set_json_setting("grok2api_config", normalize_grok2api_config(gbase))
+    if value:
+        _disable_other_backend_auto(value)
     return value
 
 
 def _disable_other_backend_auto(backend: str) -> None:
-    """When one backend enables auto-import, force the other off + pin switch."""
+    """When one backend enables auto-import, force ALL others off + pin switch."""
     backend = normalize_remote_backend(backend)
     if backend not in REMOTE_BACKENDS:
         return
     _set_json_setting("remote_backend", backend)
-    if backend == "grok2api":
-        cbase = dict(_json_setting("cpa_config") or {})
-        if cbase.get("auto_upload_after_probe") or cbase.get("auto_upload_after_relogin"):
-            cbase["auto_upload_after_probe"] = False
-            cbase["auto_upload_after_relogin"] = False
-            _set_json_setting("cpa_config", normalize_cpa_config(cbase))
-    else:
+    if backend != "grok2api":
         gbase = dict(_json_setting("grok2api_config") or {})
         if gbase.get("auto_upload_after_probe") or gbase.get("auto_upload_after_relogin"):
             gbase["auto_upload_after_probe"] = False
             gbase["auto_upload_after_relogin"] = False
             _set_json_setting("grok2api_config", normalize_grok2api_config(gbase))
+    if backend != "cpa":
+        cbase = dict(_json_setting("cpa_config") or {})
+        if cbase.get("auto_upload_after_probe") or cbase.get("auto_upload_after_relogin"):
+            cbase["auto_upload_after_probe"] = False
+            cbase["auto_upload_after_relogin"] = False
+            _set_json_setting("cpa_config", normalize_cpa_config(cbase))
+    if backend != "sub2api":
+        sbase = dict(_json_setting("sub2api_config") or {})
+        if sbase.get("auto_upload_after_probe") or sbase.get("auto_upload_after_relogin"):
+            sbase["auto_upload_after_probe"] = False
+            sbase["auto_upload_after_relogin"] = False
+            _set_json_setting("sub2api_config", normalize_sub2api_config(sbase))
 
 
 def normalize_grok2api_config(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -2132,9 +2129,11 @@ def set_grok2api_config(patch: dict[str, Any] | None, *, replace: bool = False) 
     if cfg.get("auto_upload_after_probe") or cfg.get("auto_upload_after_relogin"):
         _disable_other_backend_auto("grok2api")
     elif get_remote_backend(resolve=False) == "" and cfg.get("base_url"):
-        # First successful Grok2API save without explicit backend → pin if CPA empty.
         ccfg = normalize_cpa_config(_json_setting("cpa_config") or {})
-        if not (ccfg.get("base_url") and ccfg.get("management_key")):
+        scfg = normalize_sub2api_config(_json_setting("sub2api_config") or {})
+        c_ready = bool(ccfg.get("base_url") and ccfg.get("management_key"))
+        s_ready = bool(scfg.get("base_url") and scfg.get("api_key"))
+        if not c_ready and not s_ready:
             _set_json_setting("remote_backend", "grok2api")
     return cfg
 
@@ -2208,7 +2207,10 @@ def set_cpa_config(patch: dict[str, Any] | None, *, replace: bool = False) -> di
         _disable_other_backend_auto("cpa")
     elif get_remote_backend(resolve=False) == "" and cfg.get("base_url"):
         gcfg = normalize_grok2api_config(_json_setting("grok2api_config") or {})
-        if not (gcfg.get("base_url") and gcfg.get("username") and gcfg.get("password")):
+        scfg = normalize_sub2api_config(_json_setting("sub2api_config") or {})
+        g_ready = bool(gcfg.get("base_url") and gcfg.get("username") and gcfg.get("password"))
+        s_ready = bool(scfg.get("base_url") and scfg.get("api_key"))
+        if not g_ready and not s_ready:
             _set_json_setting("remote_backend", "cpa")
     return cfg
 
