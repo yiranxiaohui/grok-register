@@ -4580,6 +4580,8 @@ def _sub2api_parse_proxy(proxy_url: str) -> dict[str, Any] | None:
         return None
     try:
         parsed = urllib.parse.urlsplit(text)
+        host = parsed.hostname or ""
+        port = parsed.port or 0
     except ValueError:
         return None
     scheme = (parsed.scheme or "").lower()
@@ -4587,8 +4589,6 @@ def _sub2api_parse_proxy(proxy_url: str) -> dict[str, Any] | None:
         scheme = "socks5"
     if scheme not in {"http", "https", "socks5", "socks5h"}:
         return None
-    host = parsed.hostname or ""
-    port = parsed.port or 0
     if not host or port <= 0:
         return None
     return {
@@ -4605,7 +4605,8 @@ def _sub2api_ensure_proxy(cfg: dict[str, Any], proxy_url: str, cache: dict[str, 
     parsed = _sub2api_parse_proxy(proxy_url)
     if not parsed:
         return None
-    key = f"{parsed['protocol']}://{parsed['username']}@{parsed['host']}:{parsed['port']}"
+    key = f"{parsed['protocol']}://{parsed['username']}:{parsed['password']}@{parsed['host']}:{parsed['port']}"
+    key_nopw = f"{parsed['protocol']}://{parsed['username']}@{parsed['host']}:{parsed['port']}"
     if "loaded" not in cache:
         cache["loaded"] = True
         cache["map"] = {}
@@ -4615,13 +4616,19 @@ def _sub2api_ensure_proxy(cfg: dict[str, Any], proxy_url: str, cache: dict[str, 
             for it in items or []:
                 if not isinstance(it, dict):
                     continue
-                k = f"{str(it.get('protocol') or '').lower()}://{it.get('username') or ''}@{it.get('host') or ''}:{it.get('port') or 0}"
+                pwd_part = f":{it.get('password')}" if it.get("password") else ""
+                k = f"{str(it.get('protocol') or '').lower()}://{it.get('username') or ''}{pwd_part}@{it.get('host') or ''}:{it.get('port') or 0}"
+                # 同时索引无密码形式，兼容 list 接口不回传密码字段的情况
+                k_nopw = f"{str(it.get('protocol') or '').lower()}://{it.get('username') or ''}@{it.get('host') or ''}:{it.get('port') or 0}"
                 if it.get("id") is not None:
                     cache["map"][k] = int(it["id"])
+                    cache["map"].setdefault(k_nopw, int(it["id"]))
         except Exception as exc:  # noqa: BLE001
             print(f"[register-lite] sub2api list proxies failed: {str(exc)[:200]}")
     if key in cache["map"]:
         return cache["map"][key]
+    if key_nopw in cache["map"]:
+        return cache["map"][key_nopw]
     try:
         created = _sub2api_request(cfg, "POST", "/api/v1/admin/proxies", {
             "name": f"grok-register ({parsed['protocol']}://{parsed['host']}:{parsed['port']})",

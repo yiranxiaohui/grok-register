@@ -185,3 +185,26 @@ def test_ensure_proxy_creates_when_missing():
         assert pid2 == 42, pid2
     finally:
         store._urlopen = orig
+
+
+def test_parse_proxy_bad_port_returns_none():
+    assert store._sub2api_parse_proxy("socks5://host:abc") is None
+    assert store._sub2api_parse_proxy("http://1.2.3.4:99999999999") is None  # port out of range also raises ValueError
+
+
+def test_ensure_proxy_dedupe_ignores_absent_password_in_list():
+    # list API omits password → still dedupe by host/port/user
+    def fake(req, *, timeout):
+        if req.get_method() == "GET":
+            return _FakeResp(200, {"code": 0, "data": {"items": [
+                {"id": 3, "protocol": "http", "host": "10.0.0.9", "port": 3128, "username": ""}
+            ]}})
+        raise AssertionError("should not create when host/port/user match")
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        cache = {}
+        pid = store._sub2api_ensure_proxy(_S2A_CFG, "http://10.0.0.9:3128", cache)
+        assert pid == 3, pid
+    finally:
+        store._urlopen = orig
