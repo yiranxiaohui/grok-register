@@ -4532,6 +4532,114 @@ def sync_remote_status(
     return result
 
 
+def _sub2api_headers(cfg: dict[str, Any]) -> dict[str, str]:
+    return {
+        "x-api-key": str(cfg.get("api_key") or ""),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _sub2api_request(
+    cfg: dict[str, Any],
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: float = 45.0,
+) -> Any:
+    """调用 sub2api admin 接口。HTTP≥400 或 code!=0 抛 RuntimeError，返回 data 字段。"""
+    base = str(cfg.get("base_url") or "").rstrip("/")
+    if not base:
+        raise ValueError("sub2api 地址不能为空")
+    url = base + path
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=_sub2api_headers(cfg), method=method)
+    try:
+        with _urlopen(req, timeout=timeout) as resp:
+            status = int(resp.status)
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        raw = exc.read().decode("utf-8", errors="replace")
+    if status >= 400:
+        raise RuntimeError(f"sub2api 请求失败 HTTP {status}: {raw[:500]}")
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"sub2api 返回非 JSON: {raw[:200]}") from exc
+    if isinstance(payload, dict) and payload.get("code") not in (0, None):
+        msg = str(payload.get("message") or payload.get("code"))
+        raise RuntimeError(f"sub2api 返回错误 code={payload.get('code')}: {msg}")
+    return payload.get("data") if isinstance(payload, dict) else payload
+
+
+def _sub2api_parse_proxy(proxy_url: str) -> dict[str, Any] | None:
+    text = str(proxy_url or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(text)
+    except ValueError:
+        return None
+    scheme = (parsed.scheme or "").lower()
+    if scheme == "socks":
+        scheme = "socks5"
+    if scheme not in {"http", "https", "socks5", "socks5h"}:
+        return None
+    host = parsed.hostname or ""
+    port = parsed.port or 0
+    if not host or port <= 0:
+        return None
+    return {
+        "protocol": scheme,
+        "host": host,
+        "port": int(port),
+        "username": parsed.username or "",
+        "password": parsed.password or "",
+    }
+
+
+def _sub2api_ensure_proxy(cfg: dict[str, Any], proxy_url: str, cache: dict[str, Any]) -> int | None:
+    """proxy_url → sub2api proxy_id。查重复用，未命中则创建。失败返回 None（降级直连）。"""
+    parsed = _sub2api_parse_proxy(proxy_url)
+    if not parsed:
+        return None
+    key = f"{parsed['protocol']}://{parsed['username']}@{parsed['host']}:{parsed['port']}"
+    if "loaded" not in cache:
+        cache["loaded"] = True
+        cache["map"] = {}
+        try:
+            data = _sub2api_request(cfg, "GET", "/api/v1/admin/proxies/all")
+            items = data.get("items") if isinstance(data, dict) else (data or [])
+            for it in items or []:
+                if not isinstance(it, dict):
+                    continue
+                k = f"{str(it.get('protocol') or '').lower()}://{it.get('username') or ''}@{it.get('host') or ''}:{it.get('port') or 0}"
+                if it.get("id") is not None:
+                    cache["map"][k] = int(it["id"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[register-lite] sub2api list proxies failed: {str(exc)[:200]}")
+    if key in cache["map"]:
+        return cache["map"][key]
+    try:
+        created = _sub2api_request(cfg, "POST", "/api/v1/admin/proxies", {
+            "name": f"grok-register ({parsed['protocol']}://{parsed['host']}:{parsed['port']})",
+            "protocol": parsed["protocol"],
+            "host": parsed["host"],
+            "port": parsed["port"],
+            "username": parsed["username"],
+            "password": parsed["password"],
+        })
+        pid = int(created["id"]) if isinstance(created, dict) and created.get("id") is not None else None
+    except Exception as exc:  # noqa: BLE001
+        print(f"[register-lite] sub2api create proxy failed: {str(exc)[:200]}")
+        pid = None
+    if pid is not None:
+        cache["map"][key] = pid
+    return pid
+
+
 def upload_cpa_auth_files(
     config: dict[str, Any] | None = None,
     *,

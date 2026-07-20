@@ -98,3 +98,90 @@ def test_set_sub2api_config_auto_pins_backend():
         "auto_upload_after_probe": True,
     }, replace=True)
     assert store.get_remote_backend(resolve=False) == "sub2api"
+
+
+# ---------- Task 3: HTTP 辅助 + 代理同步 ----------
+
+class _FakeResp:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body if isinstance(body, bytes) else json.dumps(body).encode()
+    def read(self):
+        return self._body
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+_S2A_CFG = {"base_url": "https://s2a.example", "api_key": "k", "sync_proxies": True}
+
+
+def test_parse_proxy_socks_and_auth():
+    p = store._sub2api_parse_proxy("socks5://user:pass@1.2.3.4:1080")
+    assert p == {"protocol": "socks5", "host": "1.2.3.4", "port": 1080,
+                 "username": "user", "password": "pass"}, p
+    p2 = store._sub2api_parse_proxy("http://10.0.0.9:3128")
+    assert p2["protocol"] == "http" and p2["port"] == 3128, p2
+    assert p2["username"] == "" and p2["password"] == "", p2
+
+
+def test_parse_proxy_socks_alias_and_invalid():
+    assert store._sub2api_parse_proxy("socks://1.1.1.1:1080")["protocol"] == "socks5"
+    assert store._sub2api_parse_proxy("") is None
+    assert store._sub2api_parse_proxy("ftp://1.1.1.1:21") is None
+    assert store._sub2api_parse_proxy("garbage") is None
+
+
+def test_request_raises_on_code_nonzero():
+    orig = store._urlopen
+    store._urlopen = lambda req, *, timeout: _FakeResp(200, {"code": 1, "message": "bad key", "data": None})
+    try:
+        raised = False
+        try:
+            store._sub2api_request(_S2A_CFG, "GET", "/api/v1/admin/accounts")
+        except RuntimeError as e:
+            raised = True
+            assert "bad key" in str(e), e
+        assert raised
+    finally:
+        store._urlopen = orig
+
+
+def test_ensure_proxy_reuses_existing():
+    calls = []
+    def fake(req, *, timeout):
+        calls.append((req.get_method(), req.full_url))
+        if req.get_method() == "GET":
+            return _FakeResp(200, {"code": 0, "data": {"items": [
+                {"id": 7, "protocol": "socks5", "host": "1.2.3.4", "port": 1080, "username": "user"}
+            ]}})
+        raise AssertionError("should not POST when match exists")
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        cache = {}
+        pid = store._sub2api_ensure_proxy(_S2A_CFG, "socks5://user:pass@1.2.3.4:1080", cache)
+        assert pid == 7, pid
+    finally:
+        store._urlopen = orig
+
+
+def test_ensure_proxy_creates_when_missing():
+    def fake(req, *, timeout):
+        if req.get_method() == "GET":
+            return _FakeResp(200, {"code": 0, "data": {"items": []}})
+        # POST create
+        return _FakeResp(200, {"code": 0, "data": {"id": 42}})
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        cache = {}
+        pid = store._sub2api_ensure_proxy(_S2A_CFG, "http://10.0.0.9:3128", cache)
+        assert pid == 42, pid
+        # 缓存命中：第二次不再请求
+        store._urlopen = lambda req, *, timeout: (_ for _ in ()).throw(AssertionError("cached"))
+        pid2 = store._sub2api_ensure_proxy(_S2A_CFG, "http://10.0.0.9:3128", cache)
+        assert pid2 == 42, pid2
+    finally:
+        store._urlopen = orig
