@@ -4663,7 +4663,7 @@ def list_sub2api_sso_rows(limit: int = 1000, *, emails: list[str] | None = None)
         rows = conn.execute(
             "SELECT email, sso, proxy_url FROM accounts WHERE "
             + " AND ".join(where)
-            + " ORDER BY updated_at DESC LIMIT ?",
+            + " ORDER BY updated_at DESC, email ASC LIMIT ?",
             [*args, limit],
         ).fetchall()
     out: list[dict[str, Any]] = []
@@ -4738,7 +4738,7 @@ def upload_sub2api_sso(
                     idx = int(c.get("index") or 0)
                     if 1 <= idx <= len(chunk):
                         ok_emails.append(chunk[idx - 1]["email"])
-                    uploaded += 1
+                        uploaded += 1
                 for f in failed_items:
                     idx = int(f.get("index") or 0)
                     em = chunk[idx - 1]["email"] if 1 <= idx <= len(chunk) else ""
