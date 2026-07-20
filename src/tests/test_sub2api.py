@@ -320,3 +320,33 @@ def test_test_sub2api_remote_returns_total():
     finally:
         pass
     assert res["ok"] is True and res["grok_total"] == 12, res
+
+
+# ---------- Task 5: 自动上传调度 ----------
+
+def test_auto_upload_routes_to_sub2api_when_pinned():
+    _reset_settings()
+    with store._connect() as conn:
+        conn.execute("DELETE FROM accounts")
+        conn.execute("DELETE FROM remote_accounts")
+    _seed_account("auto@ex.com", "SSO_AUTO", status="active", probe_ok=True)
+    store._set_json_setting("sub2api_config", store.normalize_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k", "sync_proxies": False,
+        "auto_upload_after_probe": True,
+    }))
+    store.set_remote_backend("sub2api")
+    def fake(req, *, timeout):
+        if "sso-to-oauth" in req.full_url:
+            return _FakeResp(200, {"code": 0, "data": {"created": [{"index": 1, "email": "auto@ex.com"}], "failed": []}})
+        raise AssertionError("unexpected " + req.full_url)
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        out = store._upload_emails_to_remotes(["auto@ex.com"], mode="probe")
+    finally:
+        store._urlopen = orig
+    assert out["backend"] == "sub2api", out
+    assert out["sub2api"] and out["sub2api"].get("uploaded") == 1, out
+    # grok2api / cpa 被 skip
+    assert any("grok2api" in s for s in out["skipped"]), out
+    assert any("cpa" in s for s in out["skipped"]), out

@@ -2373,6 +2373,7 @@ def _upload_emails_to_remotes(
         "emails": clean,
         "grok2api": None,
         "cpa": None,
+        "sub2api": None,
         "skipped": [],
         "mode": mode,
         "backend": backend or "",
@@ -2387,7 +2388,7 @@ def _upload_emails_to_remotes(
 
     # Grok2API (skipped entirely when backend is cpa)
     if backend == "cpa":
-        out["skipped"].append("grok2api skipped: remote_backend=cpa")
+        out["skipped"].append(f"grok2api skipped: remote_backend={backend}")
     else:
         try:
             gcfg = get_grok2api_config(include_password=True)
@@ -2433,7 +2434,7 @@ def _upload_emails_to_remotes(
 
     # CPA (skipped entirely when backend is grok2api)
     if backend == "grok2api":
-        out["skipped"].append("cpa skipped: remote_backend=grok2api")
+        out["skipped"].append(f"cpa skipped: remote_backend={backend}")
     else:
         try:
             ccfg = get_cpa_config(include_key=True)
@@ -2464,6 +2465,35 @@ def _upload_emails_to_remotes(
                 out["skipped"].append(f"cpa auto {skip_tag} off")
         except Exception as exc:  # noqa: BLE001
             out["cpa"] = {"ok": False, "error": str(exc)[:300]}
+            out["ok"] = False
+
+    # sub2api (skipped when backend is grok2api or cpa)
+    if backend in {"grok2api", "cpa"}:
+        out["skipped"].append(f"sub2api skipped: remote_backend={backend}")
+    else:
+        try:
+            scfg = get_sub2api_config(include_key=True)
+            s_enabled = bool(scfg.get(flag_key)) and (backend in {"", "sub2api"})
+            s_ready = bool(scfg.get("base_url") and scfg.get("api_key"))
+            if s_enabled and s_ready:
+                limit = max(len(clean), int(scfg.get("limit") or len(clean)))
+                result = upload_sub2api_sso(scfg, limit=limit, emails=clean, require_probe=True)
+                out["sub2api"] = result
+                if not result.get("ok"):
+                    out["ok"] = False
+                else:
+                    marked = result.get("emails") if isinstance(result.get("emails"), list) else clean
+                    try:
+                        mark_local_remote_imported(marked, provider="sub2api", reason=f"auto_upload_{skip_tag}")
+                    except Exception:
+                        pass
+            elif s_enabled and not s_ready:
+                out["sub2api"] = {"ok": False, "error": "sub2api 连接未配置完整"}
+                out["ok"] = False
+            else:
+                out["skipped"].append(f"sub2api auto {skip_tag} off")
+        except Exception as exc:  # noqa: BLE001
+            out["sub2api"] = {"ok": False, "error": str(exc)[:300]}
             out["ok"] = False
 
     return out
