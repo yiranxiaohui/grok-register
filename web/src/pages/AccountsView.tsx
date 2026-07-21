@@ -630,6 +630,7 @@ export function AccountsView() {
                 <option value="active">可用</option>
                 <option value="relogged">已重登</option>
                 <option value="registered">已注册</option>
+                <option value="sso_pending">待授权(SSO)</option>
                 <option value="credentials_only">仅密码</option>
                 <option value="probe_failed">测活失败</option>
                 <option value="failed">失败</option>

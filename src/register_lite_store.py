@@ -5494,6 +5494,156 @@ def import_local_credentials(records: list[dict[str, Any]], *, source: str) -> d
     return {"ok": True, "created": created, "updated": updated, "skipped": skipped, "total": created + updated}
 
 
+def save_sso_pending_account(
+    *,
+    email: str,
+    password: str = "",
+    sso: str = "",
+    batch_id: str = "",
+    session_id: str = "",
+    proxy_url: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    """Persist email/password/SSO when OAuth conversion fails mid-registration.
+
+    Keeps the account recoverable via relogin (password) or a later
+    sso_to_auth_json pass (SSO). Does not invent access_token / auth.json.
+    Never downgrades a row that already has a real access_token.
+    """
+    email_key = str(email or "").strip().lower()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email_key):
+        return {"ok": False, "error": "invalid email"}
+    password_raw = str(password or "")
+    password_ok = password_raw if is_plausible_account_password(password_raw) else ""
+    sso_val = str(sso or "").strip()
+    if not password_ok and not sso_val:
+        return {"ok": False, "error": "missing password and sso"}
+    now = time.time()
+    status = "sso_pending" if sso_val else "credentials_only"
+    init_db()
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT email, password, sso, access_token, status, created_at, batch_id, session_id, proxy_url "
+            "FROM accounts WHERE email = ?",
+            (email_key,),
+        ).fetchone()
+        if existing is not None:
+            # Already fully imported — only fill missing password/sso; keep status.
+            has_token = bool(str(existing["access_token"] or "").strip())
+            created_at = float(existing["created_at"] or now)
+            if has_token:
+                prev_pw = str(existing["password"] or "")
+                keep_pw = (
+                    password_ok
+                    if password_ok
+                    else (prev_pw if is_plausible_account_password(prev_pw) else "")
+                )
+                keep_sso = sso_val or str(existing["sso"] or "")
+                conn.execute(
+                    """
+                    UPDATE accounts SET
+                      password = CASE WHEN ? != '' THEN ? ELSE password END,
+                      sso = CASE WHEN ? != '' THEN ? ELSE sso END,
+                      proxy_url = CASE WHEN ? != '' THEN ? ELSE proxy_url END,
+                      updated_at = ?
+                    WHERE email = ?
+                    """,
+                    (
+                        keep_pw,
+                        keep_pw,
+                        keep_sso,
+                        keep_sso,
+                        str(proxy_url or "").strip(),
+                        str(proxy_url or "").strip(),
+                        now,
+                        email_key,
+                    ),
+                )
+                return {
+                    "ok": True,
+                    "email": email_key,
+                    "status": str(existing["status"] or ""),
+                    "created": False,
+                    "merged_into_tokenized": True,
+                }
+            if not password_ok:
+                prev = str(existing["password"] or "")
+                if is_plausible_account_password(prev):
+                    password_ok = prev
+            if not sso_val:
+                sso_val = str(existing["sso"] or "")
+            status = "sso_pending" if sso_val else "credentials_only"
+        else:
+            created_at = now
+
+        payload = json.dumps(
+            {
+                "source": "registration_sso_pending",
+                "email": email_key,
+                "has_password": bool(password_ok),
+                "has_sso": bool(sso_val),
+                "reason": str(reason or "")[:240],
+            },
+            ensure_ascii=False,
+        )
+        conn.execute(
+            """
+            INSERT INTO accounts(
+              email, password, sso, auth_key, user_id, access_token, refresh_token, id_token,
+              expires_at, oidc_issuer, oidc_client_id, grok2api_auth_path, cpa_auth_path,
+              grok2api_auth_json, cpa_auth_json, status, batch_id, session_id, proxy_url,
+              created_at, updated_at, raw_json
+            )
+            VALUES (?, ?, ?, ?, '', '', '', '', '', '', '', '', '', '', '', ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+              password = CASE
+                WHEN excluded.password != '' THEN excluded.password
+                ELSE accounts.password
+              END,
+              sso = CASE WHEN excluded.sso != '' THEN excluded.sso ELSE accounts.sso END,
+              status = CASE
+                WHEN IFNULL(accounts.access_token, '') != '' THEN accounts.status
+                ELSE excluded.status
+              END,
+              batch_id = CASE
+                WHEN excluded.batch_id != '' THEN excluded.batch_id
+                ELSE accounts.batch_id
+              END,
+              session_id = CASE
+                WHEN excluded.session_id != '' THEN excluded.session_id
+                ELSE accounts.session_id
+              END,
+              proxy_url = CASE
+                WHEN excluded.proxy_url != '' THEN excluded.proxy_url
+                ELSE accounts.proxy_url
+              END,
+              updated_at = excluded.updated_at,
+              raw_json = excluded.raw_json
+            """,
+            (
+                email_key,
+                password_ok,
+                sso_val,
+                f"local::{email_key}",
+                status,
+                str(batch_id or ""),
+                str(session_id or ""),
+                str(proxy_url or "").strip(),
+                created_at,
+                now,
+                payload,
+            ),
+        )
+    return {
+        "ok": True,
+        "email": email_key,
+        "status": status,
+        "created": existing is None,
+        "has_password": bool(password_ok),
+        "has_sso": bool(sso_val),
+    }
+
+
 def account_credentials(emails: list[str]) -> list[dict[str, Any]]:
     """Return password + current auth snapshot for relogin/rollback."""
     clean = sorted({str(email or "").strip().lower() for email in emails if str(email or "").strip()})
@@ -5644,6 +5794,8 @@ def _account_list_query(
             where_parts.append("lower(IFNULL(a.status,'')) = 'registered'")
         elif status_key == "credentials_only":
             where_parts.append("lower(IFNULL(a.status,'')) = 'credentials_only'")
+        elif status_key == "sso_pending":
+            where_parts.append("lower(IFNULL(a.status,'')) = 'sso_pending'")
         elif status_key in {"relogged", "relogin_ok", "local_relogged"}:
             where_parts.append("lower(IFNULL(a.status,'')) = 'relogged'")
         else:

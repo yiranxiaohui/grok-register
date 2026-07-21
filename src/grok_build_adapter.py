@@ -2932,11 +2932,47 @@ def _run_registration(
         token = sso_import.sso_to_token(sso)
         if not token or not token.get("access_token"):
             _note_reg_pressure("device-flow conversion failed", pause_sec=10)
+            # Keep email/password/SSO so the account is not wasted: UI can filter
+            # status=sso_pending and recover via relogin (or later SSO convert).
+            pending_save: dict[str, Any] | None = None
+            try:
+                pending_save = accounts.save_sso_pending_account(
+                    email=email,
+                    password=password,
+                    sso=sso,
+                    batch_id=str(sess.get("batch_id") or ""),
+                    session_id=str(sid or ""),
+                    proxy_url=str(sess.get("proxy") or ""),
+                    reason="sso_to_auth_json conversion failed",
+                )
+                print(
+                    f"[grok-build-auth] sso_pending saved email={email} "
+                    f"result={pending_save}"
+                )
+            except Exception as pe:  # noqa: BLE001
+                print(f"[grok-build-auth] sso_pending save failed: {pe}")
+                pending_save = {"ok": False, "error": str(pe)[:180]}
+            saved_note = ""
+            if isinstance(pending_save, dict) and pending_save.get("ok"):
+                saved_note = (
+                    f"; local status=sso_pending saved "
+                    f"(has_password={bool(pending_save.get('has_password'))}, "
+                    f"has_sso={bool(pending_save.get('has_sso'))})"
+                )
+                sess["sso_pending_saved"] = pending_save
+            else:
+                err = (
+                    (pending_save or {}).get("error")
+                    if isinstance(pending_save, dict)
+                    else "save failed"
+                )
+                saved_note = f"; local sso_pending save failed: {err}"
             raise RuntimeError(
                 "SSO obtained but sso_to_auth_json conversion failed "
                 "(device verify/approve/token poll; often xAI device-flow "
                 "rate_limited/slow_down under concurrent registration). "
                 f"adapter_build={ADAPTER_BUILD}; sso_prefix={sso[:24]!r}"
+                f"{saved_note}"
             )
         _key, entry = sso_import.token_to_auth_entry(token, email=email)
         import_result = accounts.import_auth_payload(
