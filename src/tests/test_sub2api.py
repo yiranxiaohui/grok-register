@@ -19,6 +19,7 @@ def test_sub2api_config_defaults():
     assert cfg["api_key"] == "", cfg
     assert cfg["limit"] == 1000, cfg
     assert cfg["sync_proxies"] is True, cfg
+    assert cfg["group_ids"] == [], cfg
     assert cfg["auto_upload_after_probe"] is False, cfg
     assert cfg["auto_upload_after_relogin"] is False, cfg
 
@@ -35,6 +36,21 @@ def test_sub2api_config_normalizes_limit_and_bools():
     assert cfg["limit"] == 5000, cfg
     assert cfg["sync_proxies"] is False, cfg
     assert cfg["auto_upload_after_probe"] is True, cfg
+
+
+def test_sub2api_config_normalizes_group_ids():
+    cfg = store.normalize_sub2api_config({
+        "base_url": "https://s2a.example",
+        "api_key": "k",
+        "group_ids": ["3", 1, 1, 0, -2, "x", 5],
+    })
+    assert cfg["group_ids"] == [3, 1, 5], cfg
+    cfg2 = store.normalize_sub2api_config({
+        "base_url": "https://s2a.example",
+        "api_key": "k",
+        "group_ids": "7, 2;2 9",
+    })
+    assert cfg2["group_ids"] == [7, 2, 9], cfg2
 
 
 def test_sub2api_config_mask_and_preserve_key():
@@ -296,12 +312,67 @@ def test_upload_sub2api_maps_index_to_email():
     assert res["failed"] == 1, res
     # 无代理同步 → 不带 proxy_id
     assert "proxy_id" not in posts[0], posts[0]
+    assert "group_ids" not in posts[0], posts[0]
     # 成功 email 标记已导入
     with store._connect() as conn:
         row = conn.execute(
             "SELECT 1 FROM remote_accounts WHERE provider='sub2api' AND lower(email)='a@ex.com'"
         ).fetchone()
     assert row is not None
+
+
+def test_upload_sub2api_sends_group_ids():
+    _reset_settings()
+    with store._connect() as conn:
+        conn.execute("DELETE FROM accounts")
+    _seed_account("g@ex.com", "SSO_G")
+    store._set_json_setting("sub2api_config", store.normalize_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "k", "sync_proxies": False,
+        "group_ids": [11, 22],
+    }))
+    posts = []
+    def fake(req, *, timeout):
+        if req.get_method() == "POST" and "sso-to-oauth" in req.full_url:
+            body = json.loads(req.data.decode())
+            posts.append(body)
+            return _FakeResp(200, {"code": 0, "data": {
+                "created": [{"index": 1, "email": "g@ex.com"}],
+                "failed": [],
+            }})
+        raise AssertionError("unexpected " + req.full_url)
+    orig = store._urlopen
+    store._urlopen = fake
+    try:
+        res = store.upload_sub2api_sso(limit=10, emails=["g@ex.com"], require_probe=False)
+    finally:
+        store._urlopen = orig
+    assert res["uploaded"] == 1, res
+    assert posts and posts[0].get("group_ids") == [11, 22], posts
+
+
+def test_list_sub2api_groups_parses_items():
+    store._urlopen = lambda req, *, timeout: _FakeResp(200, {"code": 0, "data": [
+        {"id": 2, "name": "beta", "platform": "grok", "status": "active"},
+        {"id": 1, "name": "grok-default", "platform": "grok", "status": "active"},
+        {"id": 0, "name": "bad"},
+    ]})
+    try:
+        groups = store.list_sub2api_groups({"base_url": "https://s2a.example", "api_key": "k"})
+    finally:
+        pass
+    # sorted by name lower: beta, then grok-default
+    assert [g["name"] for g in groups] == ["beta", "grok-default"], groups
+    assert [g["id"] for g in groups] == [2, 1], groups
+
+
+def test_set_sub2api_config_preserves_group_ids_on_none():
+    _reset_settings()
+    store.set_sub2api_config({
+        "base_url": "https://s2a.example", "api_key": "secret", "group_ids": [9, 8],
+    }, replace=True)
+    store.set_sub2api_config({"base_url": "https://s2a.example", "api_key": "********", "group_ids": None})
+    cfg = store.get_sub2api_config(include_key=True)
+    assert cfg["group_ids"] == [9, 8], cfg
 
 
 def test_upload_sub2api_groups_by_proxy():

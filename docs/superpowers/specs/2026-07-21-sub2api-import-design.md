@@ -28,7 +28,7 @@ grok-register 目前支持两个远端后端：Grok2API（用户名密码登录 
 均在 `/api/v1/admin/` 前缀下，认证中间件 `admin_auth.go` 支持 `x-api-key: <admin-api-key>` 头（需在 sub2api 后台先开启管理员 API Key）。响应统一 `{code, message, data}`，`code=0` 为成功。
 
 - **SSO 批量导入**：`POST /api/v1/admin/grok/sso-to-oauth`（`grok_oauth_handler.go:306`）
-  - 请求：`{"sso_tokens": ["...", ...], "proxy_id": <int64|省略>}`；还接受 name/group_ids/concurrency 等，本期不传。
+  - 请求：`{"sso_tokens": ["...", ...], "proxy_id": <int64|省略>, "group_ids": [<id>, ...]|省略}`；`group_ids` 来自设置页预配置，空则 sub2api 自动绑 `grok-default`。
   - 服务端行为：3 并发（`grokSSOImportConcurrency=3`）逐 token 调 x.ai 做 SSO→OAuth Build token 转换（走 `proxy_id` 指定的代理），创建 Grok OAuth 账号，自动绑 `grok-default` 分组，调度导入探针（`scheduleGrokImportProbe`）。
   - 响应 `data`：`{"created": [{index, name, email, account}], "failed": [{index, error}]}`；**index 从 1 开始**，对应请求 tokens 顺序。
   - ⚠️ `normalizeSSOImportTokens` 会按逗号/换行拆分并**去重**——若请求里有重复 token，索引会错位。因此本地必须先按 sso 去重再发。

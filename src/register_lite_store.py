@@ -154,6 +154,8 @@ DEFAULT_SUB2API_CONFIG: dict[str, Any] = {
     "api_key": os.getenv("GROK_REGISTER_LITE_SUB2API_API_KEY", ""),
     "limit": 1000,
     "sync_proxies": True,
+    # 导入时绑定到 sub2api 的分组 ID 列表；空则走 sub2api 默认 grok-default
+    "group_ids": [],
     "auto_upload_after_probe": False,
     "auto_upload_after_relogin": False,
 }
@@ -2215,6 +2217,31 @@ def set_cpa_config(patch: dict[str, Any] | None, *, replace: bool = False) -> di
     return cfg
 
 
+def _normalize_sub2api_group_ids(raw: Any) -> list[int]:
+    """Normalize group_ids from list/tuple/CSV/string into unique positive ints."""
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        parts = [p.strip() for p in re.split(r"[,;\s]+", raw) if p.strip()]
+        items: list[Any] = parts
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        items = [raw]
+    out: list[int] = []
+    seen: set[int] = set()
+    for item in items:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
 def normalize_sub2api_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     src = {**DEFAULT_SUB2API_CONFIG, **(raw or {})}
     try:
@@ -2238,6 +2265,7 @@ def normalize_sub2api_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         "api_key": str(src.get("api_key") or ""),
         "limit": limit,
         "sync_proxies": bool(src.get("sync_proxies", True)),
+        "group_ids": _normalize_sub2api_group_ids(src.get("group_ids")),
         "auto_upload_after_probe": bool(src.get("auto_upload_after_probe")),
         "auto_upload_after_relogin": bool(src.get("auto_upload_after_relogin", False)),
     }
@@ -2256,6 +2284,9 @@ def get_sub2api_config(*, include_key: bool = True) -> dict[str, Any]:
 def set_sub2api_config(patch: dict[str, Any] | None, *, replace: bool = False) -> dict[str, Any]:
     base = {} if replace else (_json_setting("sub2api_config") or {})
     patch = dict(patch or {})
+    # None means "not provided" for list fields (avoid wiping on partial saves)
+    if "group_ids" in patch and patch.get("group_ids") is None:
+        patch.pop("group_ids", None)
     key = str(patch.get("api_key") or "")
     if (not key.strip()) or set(key.strip()) == {"*"} or key.strip() == "********":
         if "api_key" in patch:
@@ -4765,6 +4796,9 @@ def upload_sub2api_sso(
             body: dict[str, Any] = {"sso_tokens": [r["sso"] for r in chunk]}
             if pid is not None:
                 body["proxy_id"] = pid
+            group_ids = cfg.get("group_ids") or []
+            if group_ids:
+                body["group_ids"] = list(group_ids)
             try:
                 data = _sub2api_request(cfg, "POST", "/api/v1/admin/grok/sso-to-oauth", body, timeout=120.0)
                 created = (data.get("created") if isinstance(data, dict) else None) or []
@@ -4809,6 +4843,40 @@ def upload_sub2api_sso(
         "results": results[:50],
         "emails": ok_emails,
     }
+
+
+def list_sub2api_groups(config: dict[str, Any] | None = None, *, platform: str = "grok") -> list[dict[str, Any]]:
+    """拉取 sub2api 分组列表（默认 grok 平台），供设置页绑定选择。"""
+    cfg = normalize_sub2api_config(config or get_sub2api_config(include_key=True))
+    if not cfg["base_url"]:
+        raise ValueError("sub2api 地址不能为空")
+    if not cfg["api_key"]:
+        raise ValueError("sub2api 管理员 API Key 不能为空")
+    path = "/api/v1/admin/groups/all"
+    platform = str(platform or "").strip()
+    if platform:
+        path += "?platform=" + urllib.parse.quote(platform)
+    data = _sub2api_request(cfg, "GET", path, timeout=30.0)
+    items = data if isinstance(data, list) else (data.get("items") if isinstance(data, dict) else None) or []
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            gid = int(item.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if gid <= 0:
+            continue
+        out.append({
+            "id": gid,
+            "name": str(item.get("name") or ""),
+            "platform": str(item.get("platform") or ""),
+            "status": str(item.get("status") or ""),
+            "description": str(item.get("description") or ""),
+        })
+    out.sort(key=lambda g: ((g.get("name") or "").lower(), g.get("id") or 0))
+    return out
 
 
 def test_sub2api_remote(config: dict[str, Any] | None = None) -> dict[str, Any]:

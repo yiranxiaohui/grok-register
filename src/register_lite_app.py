@@ -483,6 +483,7 @@ class Sub2ApiConfigBody(BaseModel):
     api_key: str | None = None
     limit: int | None = None
     sync_proxies: bool | None = None
+    group_ids: list[int] | str | None = None
     auto_upload_after_probe: bool | None = None
     auto_upload_after_relogin: bool | None = None
 
@@ -2729,6 +2730,24 @@ async def test_sub2api(body: Sub2ApiConfigBody):
         return await asyncio.to_thread(lite_store.test_sub2api_remote, cfg)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@app.post(_admin_path('api', 'sub2api', 'groups'))
+async def list_sub2api_groups(body: Sub2ApiConfigBody):
+    """拉取 sub2api grok 分组，供设置页选择导入绑定目标。"""
+    raw = body.model_dump(exclude_none=False)
+    key = str(raw.get("api_key") or "")
+    if (not key.strip()) or set(key.strip()) == {"*"} or key.strip() == "********":
+        stored = lite_store.get_sub2api_config(include_key=True)
+        raw["api_key"] = stored.get("api_key") or ""
+    cfg = lite_store.normalize_sub2api_config(raw)
+    try:
+        groups = await asyncio.to_thread(
+            lambda: lite_store.list_sub2api_groups(cfg, platform="grok")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "groups": groups, "selected_group_ids": cfg.get("group_ids") or []}
 
 
 @app.post(_admin_path('api', 'sub2api', 'upload'))

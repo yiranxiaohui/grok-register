@@ -32,8 +32,17 @@ interface Sub2apiCfg {
   api_key?: string;
   limit?: number;
   sync_proxies?: boolean;
+  group_ids?: number[];
   auto_upload_after_probe?: boolean;
   auto_upload_after_relogin?: boolean;
+}
+
+interface Sub2apiGroup {
+  id: number;
+  name: string;
+  platform?: string;
+  status?: string;
+  description?: string;
 }
 
 const isMask = (v: string) => /^\*+$/.test(String(v || "").trim());
@@ -62,6 +71,9 @@ export function RemoteCards() {
   const [s, setS] = useState<Sub2apiCfg>({ limit: 1000, sync_proxies: true });
   const [sProbe, setSProbe] = useState(false);
   const [sRelogin, setSRelogin] = useState(false);
+  const [sGroups, setSGroups] = useState<Sub2apiGroup[]>([]);
+  const [sGroupsStatus, setSGroupsStatus] = useState("");
+
   const [sStatus, setSStatus] = useState<{ text: string; kind: "" | "ok" | "warn" | "bad"; show: boolean }>({ text: "待机", kind: "", show: false });
   const [sLog, setSLog] = useState<unknown>(null);
 
@@ -125,11 +137,15 @@ export function RemoteCards() {
 
   const applySub2api = useCallback((cfg: Sub2apiCfg) => {
     cfg = cfg || {};
+    const ids = Array.isArray(cfg.group_ids)
+      ? cfg.group_ids.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
+      : [];
     setS({
       base_url: cfg.base_url || "",
       api_key: isMask(cfg.api_key || "") ? "" : cfg.api_key || "",
       limit: cfg.limit == null ? 1000 : cfg.limit,
       sync_proxies: cfg.sync_proxies !== false,
+      group_ids: ids,
     });
     setSProbe(!!cfg.auto_upload_after_probe);
     setSRelogin(!!cfg.auto_upload_after_relogin);
@@ -204,11 +220,15 @@ export function RemoteCards() {
   const sub2apiPayload = () => {
     let key = s.api_key || "";
     if (isMask(key)) key = "";
+    const groupIds = Array.isArray(s.group_ids)
+      ? s.group_ids.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
+      : [];
     return {
       base_url: (s.base_url || "").trim(),
       api_key: key,
       limit: s.limit ?? 1000,
       sync_proxies: s.sync_proxies !== false,
+      group_ids: groupIds,
       auto_upload_after_probe: sProbe,
       auto_upload_after_relogin: sRelogin,
     };
@@ -282,6 +302,43 @@ export function RemoteCards() {
     toast(data.ok ? "CPA auth-files 可用" + (data.total != null ? " · total " + data.total : "") + (data.xai_total != null ? " · xai " + data.xai_total : "") : data.error || data.message || "CPA 测试失败");
   };
 
+  const loadSub2apiGroups = async () => {
+    setSGroupsStatus("加载中…");
+    try {
+      const data = await api<{ ok?: boolean; groups?: Sub2apiGroup[] }>(
+        adminUrl("api", "sub2api", "groups"),
+        { method: "POST", body: JSON.stringify(sub2apiPayload()) },
+      );
+      const groups = Array.isArray(data.groups) ? data.groups : [];
+      setSGroups(groups);
+      setSGroupsStatus(groups.length ? `已加载 ${groups.length} 个 grok 分组` : "未找到 grok 分组");
+      // 去掉远端已不存在的已选 id，避免脏数据
+      const valid = new Set(groups.map((g) => g.id));
+      setS((prev) => {
+        const cur = Array.isArray(prev.group_ids) ? prev.group_ids : [];
+        const next = cur.filter((id) => valid.has(id));
+        // 若尚未选过分组且存在 grok-default，默认勾上
+        if (next.length === 0 && cur.length === 0) {
+          const def = groups.find((g) => (g.name || "").toLowerCase() === "grok-default");
+          if (def) return { ...prev, group_ids: [def.id] };
+        }
+        return next.length === cur.length ? prev : { ...prev, group_ids: next };
+      });
+    } catch (err) {
+      setSGroupsStatus((err as Error).message || "加载分组失败");
+      throw err;
+    }
+  };
+
+  const toggleSub2apiGroup = (id: number) => {
+    setS((prev) => {
+      const cur = Array.isArray(prev.group_ids) ? prev.group_ids : [];
+      const has = cur.includes(id);
+      const next = has ? cur.filter((x) => x !== id) : [...cur, id];
+      return { ...prev, group_ids: next };
+    });
+  };
+
   const saveSub2api = async () => {
     enforceExclusive("sub2api");
     setSStatus({ text: "保存中", kind: "warn", show: true });
@@ -302,6 +359,9 @@ export function RemoteCards() {
     setSStatus({ text: data.ok ? "测试通过" : "测试失败", kind: data.ok ? "ok" : "bad", show: true });
     setSLog(data);
     toast(data.ok ? "sub2api 可用" + (data.grok_total != null ? " · grok " + data.grok_total : "") : data.error || data.message || "sub2api 测试失败");
+    if (data.ok) {
+      try { await loadSub2apiGroups(); } catch { /* groups optional after test */ }
+    }
   };
 
   return (
@@ -463,6 +523,40 @@ export function RemoteCards() {
           <div>
             <label htmlFor="sub2api_limit">上限</label>
             <input id="sub2api_limit" type="number" min={1} max={5000} value={s.limit ?? 1000} onChange={(e) => setS({ ...s, limit: Number(e.target.value) })} />
+          </div>
+          <div className="span-2">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+              <label style={{ margin: 0 }}>导入绑定分组</label>
+              <button className="btn" type="button" style={{ padding: "4px 10px", fontSize: 12 }} onClick={() => run(loadSub2apiGroups, "s")}>刷新分组</button>
+            </div>
+            <p className="muted" style={{ margin: "4px 0 8px", fontSize: 12 }}>
+              在设置中预先选定；导入到 sub2api 时会写入 <code>group_ids</code>。未选则由 sub2api 自动绑 <code>grok-default</code>（若存在）。
+              {sGroupsStatus ? ` · ${sGroupsStatus}` : ""}
+            </p>
+            {sGroups.length > 0 ? (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 160, overflow: "auto", padding: "4px 0" }}>
+                {sGroups.map((g) => {
+                  const checked = (s.group_ids || []).includes(g.id);
+                  return (
+                    <label key={g.id} className="header-check" title={g.description || g.name} style={{ margin: 0 }}>
+                      <input type="checkbox" checked={checked} onChange={() => toggleSub2apiGroup(g.id)} />
+                      {g.name || `分组#${g.id}`}
+                      <span className="muted" style={{ fontSize: 11 }}>#{g.id}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="muted" style={{ margin: 0, fontSize: 12 }}>
+                先填写地址与 API Key，点「测试」或「刷新分组」拉取 sub2api 的 grok 分组。
+                {(s.group_ids || []).length > 0 ? ` 当前已保存 ID：${(s.group_ids || []).join(", ")}` : ""}
+              </p>
+            )}
+            {(s.group_ids || []).length > 0 && (
+              <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                已选 {(s.group_ids || []).length} 个：{(s.group_ids || []).join(", ")}
+              </p>
+            )}
           </div>
         </div>
         <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>通过 sub2api 原生 <code>/admin/grok/sso-to-oauth</code> 导入：只上传本地 SSO，转换与探活由 sub2api 完成。需先在 sub2api 后台开启管理员 API Key。</p>
